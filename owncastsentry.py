@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 OWNCAST_STATUS_PATH = "/api/status"
 
 # User agent to send with all HTTP requests.
-USER_AGENT = "OwncastSentry/1.0.0 (bot; +https://git.logal.dev/LogalDeveloper/OwncastSentry)"
+USER_AGENT = "OwncastSentry/1.0.1 (bot; +https://git.logal.dev/LogalDeveloper/OwncastSentry)"
 
 
 # ===== DATABASE MIGRATIONS =====
