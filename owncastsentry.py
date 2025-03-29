@@ -279,9 +279,17 @@ class OwncastSentry(Plugin):
         successful_notifications = 0
         failed_notifications = 0
 
+        # Build the message body text.
+        body_text = "🎥 " + domain + " is now live!"
+
+        # Streams can have no title. If there is none, don't even mention it.
+        if title != "":
+            body_text += "\nStream Title: " + title
+
+        body_text += "\n\nTo tune in, visit: https://" + domain + "/"
+
         # Iterate over the subscribed rooms and try to send a message to each.
         # TODO: This should probably be made async.
-        body_text = "🎥 " + domain + " is now live!\nStream Title: " + title +"\n\nTo tune in, visit: https://" + domain + "/"
         for rows in results:
             room_id = rows["room_id"]
             try:
