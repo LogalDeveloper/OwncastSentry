@@ -97,16 +97,24 @@ class OwncastSentry(Plugin):
         :return: Nothing.
         """
 
-        # Convert the semi-unpredictable user input to only a domain and verify it's an Owncast stream.
-        stream_domain = await self.validate_url_as_owncast_stream(url)
+        # Convert the user input to only a domain.
+        stream_domain = self.domainify(url)
 
-        # Did the validation return an empty string?
-        if stream_domain == "":
-            # Yes, it's not valid. Tell the user and give up.
-            await evt.reply("The URL you supplied does not appear to be a valid Owncast instance. You may have specified an invalid domain, or the instance is offline.")
-            return
+        # How many subscriptions already exist for this domain?
+        query = "SELECT COUNT(*) FROM subscriptions WHERE stream_domain=$1"
+        async with self.database.acquire() as connection:
+            result = await connection.fetchrow(query, stream_domain)
 
-        # Try to add a new subscription for the requested stream domain in the room the command executed in.
+        if result[0] == 0:
+            # There are 0 subscriptions, we need to validate this domain is an Owncast stream.
+            # Attempt to fetch the stream state from this domain.
+            stream_state = await self.get_current_stream_state(stream_domain)
+            if len(stream_state) == 0:
+                # The stream state fetch returned nothing. Probably not an Owncast stream.
+                await evt.reply("The URL you supplied does not appear to be a valid Owncast instance. You may have specified an invalid domain, or the instance is offline.")
+                return
+
+        # Try to add a new subscription for the requested stream domain in the room the command was executed in.
         try:
             query = "INSERT INTO subscriptions (stream_domain, room_id) VALUES ($1, $2)"
             async with self.database.acquire() as connection:
@@ -153,14 +161,8 @@ class OwncastSentry(Plugin):
         :param url: A string containing the user supplied URL to a stream to try and unsubscribe from.
         :return: Nothing.
         """
-        # Convert the user input to only a domain and verify it's an Owncast stream.
-        stream_domain = await self.validate_url_as_owncast_stream(url)
-
-        # Did the validation return an empty string?
-        if stream_domain == "":
-            # Yes, it's not valid. Tell the user and give up.
-            await evt.reply("The URL you supplied does not appear to be a valid Owncast instance. You may have specified an invalid domain, or the instance is offline.")
-            return
+        # Convert the user input to only a domain.
+        stream_domain = self.domainify(url)
 
         # Attempt to delete the requested subscription from the database.
         query = "DELETE FROM subscriptions WHERE stream_domain=$1 AND room_id=$2"
@@ -358,15 +360,13 @@ class OwncastSentry(Plugin):
 
         return new_state
 
-
-    async def validate_url_as_owncast_stream(self, url) -> str:
+    def domainify(self, url) -> str:
         """
-        Take a given URL and validate its domain is a valid Owncast stream.
+        Take a given URL and convert it to just the domain.
 
-        :param url: A URL with the domain to check for an Owncast stream.
-        :return: A string with just the domain if it contains an Owncast stream, or an empty string if an error occurred or is otherwise not valid.
+        :param url:
+        :return:
         """
-
         # Take whatever input the user provided and try to turn it into just the domain.
         # Examples:
         # "stream.logal.dev" -> "stream.logal.dev"
@@ -375,12 +375,4 @@ class OwncastSentry(Plugin):
         # "https://stream.logal.dev/abcdefghijklmno/123456789" -> "stream.logal.dev
         parsed_url = urlparse(url)
         domain = (parsed_url.netloc or parsed_url.path).lower()
-
-        # Try to fetch the current status of the stream at the given domain.
-        stream_state = await self.get_current_stream_state(domain)
-
-        # The above method does all the checking. If the length of the output dictionary is more than 0, it should be valid. Otherwise, pass an empty string to say it's invalid.
-        if len(stream_state) > 0:
-            return domain
-        else:
-            return ""
+        return domain
