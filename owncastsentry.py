@@ -20,6 +20,9 @@ from urllib.parse import urlparse
 # Path to the GetStatus API call on Owncast instances
 OWNCAST_STATUS_PATH = "/api/status"
 
+# Path to GetWebConfig API call on Owncast instances
+OWNCAST_CONFIG_PATH = "/api/config"
+
 # User agent to send with all HTTP requests.
 USER_AGENT = "OwncastSentry/1.0.1 (bot; +https://git.logal.dev/LogalDeveloper/OwncastSentry)"
 
@@ -108,7 +111,7 @@ class OwncastSentry(Plugin):
         if result[0] == 0:
             # There are 0 subscriptions, we need to validate this domain is an Owncast stream.
             # Attempt to fetch the stream state from this domain.
-            stream_state = await self.get_current_stream_state(stream_domain)
+            stream_state = await self.get_stream_state(stream_domain)
             if len(stream_state) == 0:
                 # The stream state fetch returned nothing. Probably not an Owncast stream.
                 await evt.reply("The URL you supplied does not appear to be a valid Owncast instance. You may have specified an invalid domain, or the instance is offline.")
@@ -221,7 +224,7 @@ class OwncastSentry(Plugin):
         send_notifications = True
 
         # Fetch the latest stream state from the server.
-        new_state = await self.get_current_stream_state(domain)
+        new_state = await self.get_stream_state(domain)
 
         # Skip the update if the fetch failed for any reason.
         if new_state == {}:
@@ -281,14 +284,24 @@ class OwncastSentry(Plugin):
         successful_notifications = 0
         failed_notifications = 0
 
+        stream_config = await self.get_stream_config(domain)
+
         # Build the message body text.
-        body_text = "🎥 " + domain + " is now live!"
+        if "name" in stream_config:
+            body_text = "🎥 " + stream_config["name"] + " is now live!"
+        else:
+            # Turns out it is possible to set an empty name for an Owncast stream if you know how.
+            # We'll account for that... Just in case.
+            body_text = "🎥 " + domain + " is now live!"
 
         # Streams can have no title. If there is none, don't even mention it.
         if title != "":
             body_text += "\nStream Title: " + title
 
-        body_text += "\n\nTo tune in, visit: https://" + domain + "/"
+        body_text += "\n\nTo tune in, visit: https://" + domain + "/\n\n"
+
+        for tag in stream_config["tags"]:
+            body_text += "#" + tag + " "
 
         # Iterate over the subscribed rooms and try to send a message to each.
         # TODO: This should probably be made async.
@@ -311,7 +324,7 @@ class OwncastSentry(Plugin):
 
 
     # ========== HELPER METHODS ==========
-    async def get_current_stream_state(self, domain):
+    async def get_stream_state(self, domain):
         """
         Get the current stream state for a given domain.
         HTTPS on port 443 is assumed, no other protocols or ports are supported.
@@ -359,6 +372,41 @@ class OwncastSentry(Plugin):
             return {}
 
         return new_state
+
+    async def get_stream_config(self, domain):
+        """
+        Get the current stream config for a given domain.
+        HTTPS on port 443 is assumed, no other protocols or ports are supported.
+
+        :param domain: The domain (not URL) where the stream is hosted.
+        :return: A dictionary containing the stream's configuration.
+        """
+        self.log.debug(f"[{domain}] Fetching current stream config...")
+        # Build a URL to the config API in Owncast. (https://owncast.online/api/latest/#tag/Internal/operation/GetWebConfig)
+        # Only use HTTPS, even if the user specified something else.
+        status_url = "https://" + domain + OWNCAST_CONFIG_PATH
+
+        # Make a request to the endpoint.
+        try:
+            response = await self.session.request("GET", status_url, allow_redirects=False)
+        except Exception as e:
+            self.log.warning(f"[{domain}] Error making GET request to {OWNCAST_STATUS_PATH}: {e}")
+            return {}
+
+        # Check the response code is success
+        # TODO: Handle 429 rate limiting?
+        if response.status != 200:
+            self.log.warning(f"[{domain}] Response to request on {OWNCAST_STATUS_PATH} was not 200, got {response.status} instead.")
+            return {}
+
+        # Try and interpret the response as JSON.
+        try:
+            config = json.loads(await response.read())
+        except Exception as e:
+            self.log.warning(f"[{domain}] Rejecting response to request on {OWNCAST_STATUS_PATH} as could not be interpreted as JSON: {e}")
+            return {}
+
+        return config
 
     def domainify(self, url) -> str:
         """
