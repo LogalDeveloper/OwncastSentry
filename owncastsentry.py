@@ -507,11 +507,11 @@ class OwncastSentry(Plugin):
         # "stream.logal.dev/embed/chat/readwrite" -> "stream.logal.dev"
         # "https://stream.logal.dev/abcdefghijklmno/123456789" -> "stream.logal.dev"
         # "notify@stream.logal.dev" -> "stream.logal.dev"
-        
+
         parsed_url = urlparse(url)
         domain = (parsed_url.netloc or parsed_url.path).lower()
 
         if "@" in domain:
-            return domain.split('@')[-1]
-            
-        return domain 
+            return domain.split("@")[-1]
+
+        return domain
