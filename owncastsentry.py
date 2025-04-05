@@ -353,7 +353,7 @@ class OwncastSentry(Plugin):
         if title != "":
             body_text += "\nStream Title: " + title
 
-        body_text += "\n\nTo tune in, visit: https://" + domain + "/\n\n"
+        body_text += "\n\nTo tune in, visit: https://" + domain + "/"
 
         if "tags" in stream_config and len(stream_config["tags"]) > 0:
             body_text += "\n\n"
