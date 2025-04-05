@@ -1,6 +1,6 @@
 maubot: 0.1.0
 id: dev.logal.owncastsentry
-version: 1.0.1
+version: 1.0.2
 license: Apache-2.0
 modules:
   - owncastsentry

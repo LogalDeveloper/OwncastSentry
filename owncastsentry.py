@@ -25,7 +25,7 @@ OWNCAST_CONFIG_PATH = "/api/config"
 
 # User agent to send with all HTTP requests.
 USER_AGENT = (
-    "OwncastSentry/1.0.1 (bot; +https://git.logal.dev/LogalDeveloper/OwncastSentry)"
+    "OwncastSentry/1.0.2 (bot; +https://git.logal.dev/LogalDeveloper/OwncastSentry)"
 )
 
 
