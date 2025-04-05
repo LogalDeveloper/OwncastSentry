@@ -1,0 +1,20 @@
+name: Build Maubot Plugin Artifact
+on: [push]
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build artifact
+        run: zip -v -9 OwncastSentry-v${{env.GITHUB_SHA}}.mbp LICENSE.txt maubot.yaml owncastsentry.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: Maubot Plugin
+          path: OwncastSentry-v${{env.GITHUB_SHA}}.mbp
