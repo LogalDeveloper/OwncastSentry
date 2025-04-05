@@ -300,8 +300,9 @@ class OwncastSentry(Plugin):
 
         body_text += "\n\nTo tune in, visit: https://" + domain + "/\n\n"
 
-        for tag in stream_config["tags"]:
-            body_text += "#" + tag + " "
+        if "tags" in stream_config and len(stream_config["tags"]) > 0:
+            body_text += "\n\n"
+            body_text += " ".join("#" + tag for tag in stream_config["tags"])
 
         # Iterate over the subscribed rooms and try to send a message to each.
         # TODO: This should probably be made async.
