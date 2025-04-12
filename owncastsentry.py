@@ -8,6 +8,7 @@ import sqlite3
 import aiohttp
 import json
 import asyncio
+import time
 
 from maubot import Plugin, MessageEvent
 from maubot.handlers import command
@@ -28,6 +29,16 @@ USER_AGENT = (
     "OwncastSentry/1.0.3 (bot; +https://git.logal.dev/LogalDeveloper/OwncastSentry)"
 )
 
+# Hard minimum amount of time between when notifications can be sent for a stream. Prevents spamming notifications for glitchy or malicious streams.
+SECONDS_BETWEEN_NOTIFICATIONS = 20 * 60  # 20 minutes in seconds
+
+# I'm not sure the best way to name or explain this variable, so let's just say what uses it:
+#
+# After a stream goes offline, a timer is started. Then, ...
+# - If a stream comes back online with the same title within this time, no notification is sent.
+# - If a stream comes back online with a different title, a rename notification is sent.
+# - If this time period passes entirely and a stream comes back online after, it's treated as regular going live.
+TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN = 7 * 60  # 7 minutes in seconds
 
 # ===== DATABASE MIGRATIONS =====
 upgrade_table = UpgradeTable()
@@ -80,6 +91,12 @@ class OwncastSentry(Plugin):
     session = aiohttp.ClientSession(
         headers=headers, cookie_jar=cookie_jar, timeout=timeouts, connector=baseconnctor
     )
+
+    # Keeps track of when a notification was last sent for streams.
+    notification_timers_cache = {}
+
+    # Keeps track of when streams last went offline.
+    offline_timer_cache = {}
 
     @classmethod
     def get_db_upgrade_table(cls) -> UpgradeTable | None:
@@ -285,15 +302,13 @@ class OwncastSentry(Plugin):
         ):
             # Yes! This stream is now live. Send notifications and log it, if allowed.
             if send_notifications:
-                self.log.info(
-                    f"[{domain}] Stream is now live! Notifying subscribed rooms..."
-                )
+                self.log.info(f"[{domain}] Stream is now live!")
                 await self.notify_rooms_of_stream_online(
-                    domain, new_state["streamTitle"]
+                    domain, new_state["streamTitle"], False
                 )
             else:
                 self.log.info(
-                    f"[{domain}] Stream is live, but performed first update. WIll not notify subscribed rooms."
+                    f"[{domain}] Stream is live, but performed first update. Will not notify subscribed rooms."
                 )
 
         # Does the latest stream state no longer have a last connect time but the old state does?
@@ -322,14 +337,32 @@ class OwncastSentry(Plugin):
         # All done.
         self.log.debug(f"[{domain}] State update completed.")
 
-    async def notify_rooms_of_stream_online(self, domain: str, title: str) -> None:
+    async def notify_rooms_of_stream_online(
+        self, domain: str, title: str, renamed: bool
+    ) -> None:
         """
         Sends notifications to rooms with subscriptions to the provided stream domain.
 
         :param domain: The domain of the stream to send notifications for.
         :param title: The title of the stream to include in the message.
+        :param renamed: Whether or not this is for a stream changing its title rather than going live.
         :return: Nothing.
         """
+
+        # Has enough time passed since the last notification was sent?
+        if domain in self.notification_timers_cache:
+            seconds_since_last_notification = round(
+                time.time() - self.notification_timers_cache[domain]
+            )
+            if seconds_since_last_notification < SECONDS_BETWEEN_NOTIFICATIONS:
+                self.log.info(
+                    f"[{domain}] Not sending notifications. Only {seconds_since_last_notification} of required {SECONDS_BETWEEN_NOTIFICATIONS} seconds has passed since last notification."
+                )
+                return
+
+        # Yes. Log the current time and proceed with sending notifications.
+        self.notification_timers_cache[domain] = time.time()
+
         # Get a list of room IDs with active subscriptions to the stream domain.
         query = "SELECT room_id FROM subscriptions WHERE stream_domain=$1"
         async with self.database.acquire() as connection:
