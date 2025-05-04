@@ -271,9 +271,8 @@ class OwncastSentry(Plugin):
         :return: Nothing.
         """
 
-        # A flag indicating whether to send a notification.
-        # Used for the first state update of a brand-new stream to avoid sending notifications if its already live.
-        first_update = True
+        # A flag indicating whether this is the first state update of a brand-new stream to avoid sending notifications if its already live.
+        first_update = False
 
         # A flag indicating whether to update the stream's state in the databased.
         # Used to avoid writing to the database when a stream's state hasn't changed at all.
@@ -307,7 +306,7 @@ class OwncastSentry(Plugin):
         ):
             # Yes, this is the first update. Don't send any notifications.
             update_database = True
-            first_update = False
+            first_update = True
 
         # Does the latest stream state have a last connect time and the old state not have one?
         if (
@@ -318,14 +317,6 @@ class OwncastSentry(Plugin):
             update_database = True
             stream_config = await self.get_stream_config(domain)
 
-            # Is this the first update for this stream?
-            if not first_update:
-                # Yes, only log it and stop any further work on this stream.
-                self.log.info(
-                    f"[{domain}] Stream is live, but performed first update. Will not notify subscribed rooms."
-                )
-                return
-
             self.log.info(f"[{domain}] Stream is now live!")
 
             # Calculate how many seconds since the stream last went offline
@@ -333,31 +324,38 @@ class OwncastSentry(Plugin):
                 time.time() - self.offline_timer_cache[domain]
             )
 
-            # Has this stream been offline for a short amount of time?
-            if seconds_since_last_offline < TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN:
-                # Yes. Did the stream title change?
-                if old_state["title"] != new_state["streamTitle"]:
-                    # Yes. The stream was only down for a short time, send a special notification indicating the stream changed its name.
+            # Have we queried this stream before? (In other words, is this not the first state update ever?)
+            if not first_update:
+                # Yes. Has this stream been offline for a short amount of time?
+                if seconds_since_last_offline < TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN:
+                    # Yes. Did the stream title change?
+                    if old_state["title"] != new_state["streamTitle"]:
+                        # Yes. The stream was only down for a short time, send a special notification indicating the stream changed its name.
+                        await self.notify_rooms_of_stream_online(
+                            domain,
+                            stream_config["name"],
+                            new_state["streamTitle"],
+                            True,
+                            stream_config["tags"],
+                        )
+                    else:
+                        # No. The stream was only down for a short time and didn't change its title. Don't send a notification.
+                        self.log.info(
+                            f"[{domain}] Not sending notifications. Stream was only offline for {seconds_since_last_offline} of {TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN} seconds and did not change its title."
+                        )
+                else:
+                    # This stream has been offline for a while. Send a normal notification.
                     await self.notify_rooms_of_stream_online(
                         domain,
                         stream_config["name"],
                         new_state["streamTitle"],
-                        True,
+                        False,
                         stream_config["tags"],
                     )
-                else:
-                    # No. The stream was only down for a short time and didn't change its title. Don't send a notification.
-                    self.log.info(
-                        f"[{domain}] Not sending notifications. Stream was only offline for {seconds_since_last_offline} of {TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN} seconds and did not change its title."
-                    )
             else:
-                # This stream has been offline for a while. Send a normal notification.
-                await self.notify_rooms_of_stream_online(
-                    domain,
-                    stream_config["name"],
-                    new_state["streamTitle"],
-                    False,
-                    stream_config["tags"],
+                # No, this is the first time we're querying 
+                self.log.info(
+                    f"[{domain}] Not sending notifications. This is the first state update for this stream."
                 )
 
         if (
@@ -406,9 +404,9 @@ class OwncastSentry(Plugin):
             stream_config = await self.get_stream_config(domain)
             self.offline_timer_cache[domain] = time.time()
             if first_update:
-                self.log.info(f"[{domain}] Stream is now offline.")
-            else:
                 self.log.info(f"[{domain}] Stream is offline.")
+            else:
+                self.log.info(f"[{domain}] Stream is now offline.")
 
         # Update the database with the current stream state, if needed.
         if update_database:
