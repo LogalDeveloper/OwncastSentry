@@ -38,6 +38,37 @@ async def upgrade_v1(conn: Connection) -> None:
     )
 
 
+@upgrade_table.register(description="Fix stream_domain column type from INTEGER to TEXT")
+async def upgrade_v2(conn: Connection) -> None:
+    """
+    Runs migrations to upgrade database schema to version 2 format.
+    Version 2 fixes the stream_domain column type in subscriptions table from INTEGER to TEXT.
+
+    :param conn: A connection to run the v2 database migration on.
+    :return: Nothing.
+    """
+    # Create new subscriptions table with correct schema
+    await conn.execute(
+        """CREATE TABLE "subscriptions_new" (
+	        "stream_domain"	TEXT NOT NULL,
+	        "room_id"	TEXT NOT NULL,
+	        UNIQUE("room_id","stream_domain")
+        )"""
+    )
+
+    # Copy all existing data from old table to new table
+    await conn.execute(
+        """INSERT INTO subscriptions_new (stream_domain, room_id)
+           SELECT stream_domain, room_id FROM subscriptions"""
+    )
+
+    # Drop the old table
+    await conn.execute("DROP TABLE subscriptions")
+
+    # Rename new table to original name
+    await conn.execute("ALTER TABLE subscriptions_new RENAME TO subscriptions")
+
+
 def get_upgrade_table() -> UpgradeTable:
     """
     Helper function for retrieving the upgrade table.
