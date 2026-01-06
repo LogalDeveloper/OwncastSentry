@@ -172,3 +172,70 @@ class NotificationService:
         :return: Nothing
         """
         self.notification_timers_cache[domain] = time.time()
+
+    async def send_cleanup_warning(self, domain: str) -> None:
+        """
+        Send 83-day warning notification to all subscribed rooms.
+
+        :param domain: The stream domain
+        :return: Nothing
+        """
+        # Get all subscribed rooms
+        room_ids = await self.subscription_repo.get_subscribed_rooms(domain)
+
+        # Build the warning message
+        body_text = (
+            f"⚠️  Warning: Subscription Cleanup Scheduled\n\n"
+            f"The Owncast instance at {domain} has been unreachable for 83 days. "
+            f"If it remains unreachable for 7 more days (90 days total), this "
+            f"subscription will be automatically removed."
+        )
+
+        # Send to all rooms in parallel
+        tasks = []
+        for room_id in room_ids:
+            tasks.append(self._send_notification(room_id, body_text, domain))
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Count successes and failures
+        successful = sum(1 for r in results if not isinstance(r, Exception))
+        failed = sum(1 for r in results if isinstance(r, Exception))
+
+        self.log.info(
+            f"[{domain}] Sent cleanup warning to {successful} rooms ({failed} failed)."
+        )
+
+    async def send_cleanup_deletion(self, domain: str) -> None:
+        """
+        Send 90-day deletion notification to all subscribed rooms.
+
+        :param domain: The stream domain
+        :return: Nothing
+        """
+        # Get all subscribed rooms
+        room_ids = await self.subscription_repo.get_subscribed_rooms(domain)
+
+        # Build the deletion message
+        body_text = (
+            f"🗑️  Subscription Automatically Removed\n\n"
+            f"The Owncast instance at {domain} has been unreachable for 90 days "
+            f"and has been automatically removed from subscriptions in this room.\n\n"
+            f"If the instance comes online again and you want to resubscribe, "
+            f"run `!subscribe {domain}`."
+        )
+
+        # Send to all rooms in parallel
+        tasks = []
+        for room_id in room_ids:
+            tasks.append(self._send_notification(room_id, body_text, domain))
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Count successes and failures
+        successful = sum(1 for r in results if not isinstance(r, Exception))
+        failed = sum(1 for r in results if isinstance(r, Exception))
+
+        self.log.info(
+            f"[{domain}] Sent cleanup deletion notice to {successful} rooms ({failed} failed)."
+        )

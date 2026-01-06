@@ -17,6 +17,7 @@ class StreamState:
     title: Optional[str] = None
     last_connect_time: Optional[str] = None
     last_disconnect_time: Optional[str] = None
+    failure_counter: int = 0
 
     @property
     def online(self) -> bool:
@@ -37,6 +38,7 @@ class StreamState:
             title=row["title"],
             last_connect_time=row["last_connect_time"],
             last_disconnect_time=row["last_disconnect_time"],
+            failure_counter=row["failure_counter"],
         )
 
 

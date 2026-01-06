@@ -11,7 +11,12 @@ from .owncast_client import OwncastClient
 from .database import StreamRepository, SubscriptionRepository
 from .notification_service import NotificationService
 from .models import StreamState
-from .utils import TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN
+from .utils import (
+    TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN,
+    CLEANUP_WARNING_THRESHOLD,
+    CLEANUP_DELETE_THRESHOLD,
+    should_query_stream,
+)
 
 
 class StreamMonitor:
@@ -62,10 +67,26 @@ class StreamMonitor:
     async def update_stream(self, domain: str) -> None:
         """
         Updates the state of a given stream domain and sends notifications to subscribed Matrix rooms if it goes live.
+        Implements progressive backoff for connection failures and auto-cleanup for dead instances.
 
         :param domain: The domain of the stream to update.
         :return: Nothing.
         """
+        # Fetch the current stream state from database to check failure_counter
+        old_state = await self.stream_repo.get_by_domain(domain)
+        failure_counter = old_state.failure_counter if old_state else 0
+
+        # Check if we should query this stream based on backoff schedule
+        if not should_query_stream(failure_counter):
+            # Skip this cycle, increment counter to track time passage
+            await self.stream_repo.increment_failure_counter(domain)
+            self.log.debug(
+                f"[{domain}] Skipping query due to backoff (counter={failure_counter + 1})"
+            )
+            # Check cleanup thresholds even when skipping query
+            await self._check_cleanup_thresholds(domain, failure_counter + 1)
+            return
+
         # A flag indicating whether this is the first state update of a brand-new stream to avoid sending notifications if its already live.
         first_update = False
 
@@ -79,18 +100,24 @@ class StreamMonitor:
         # Fetch the latest stream state from the server
         new_state_dict = await self.owncast_client.get_stream_state(domain)
 
-        # Skip the update if the fetch failed for any reason
+        # If the fetch failed, increment failure counter and skip the update
         if new_state_dict is None:
+            await self.stream_repo.increment_failure_counter(domain)
+            self.log.warning(
+                f"[{domain}] Connection failure (counter={failure_counter + 1})"
+            )
+            # Check cleanup thresholds after connection failure
+            await self._check_cleanup_thresholds(domain, failure_counter + 1)
             return
+
+        # Fetch succeeded! Reset failure counter
+        await self.stream_repo.reset_failure_counter(domain)
 
         # Fix possible race conditions with timers
         if domain not in self.offline_timer_cache:
             self.offline_timer_cache[domain] = 0
         if domain not in self.notification_service.notification_timers_cache:
             self.notification_service.notification_timers_cache[domain] = 0
-
-        # Fetch the last known stream state from the database
-        old_state = await self.stream_repo.get_by_domain(domain)
 
         # Does the last known stream state not have a value for the last connect and disconnect time?
         if (
@@ -232,3 +259,39 @@ class StreamMonitor:
 
         # All done.
         self.log.debug(f"[{domain}] State update completed.")
+
+    async def _check_cleanup_thresholds(self, domain: str, counter: int) -> None:
+        """
+        Check if a domain has hit cleanup warning or deletion thresholds.
+
+        :param domain: The domain to check
+        :param counter: The current failure counter value
+        :return: Nothing
+        """
+        # Check for 83-day warning threshold
+        if counter == CLEANUP_WARNING_THRESHOLD:
+            self.log.warning(
+                f"[{domain}] Reached 83-day warning threshold. Sending cleanup warning."
+            )
+            await self.notification_service.send_cleanup_warning(domain)
+
+        # Check for 90-day deletion threshold
+        if counter >= CLEANUP_DELETE_THRESHOLD:
+            self.log.warning(
+                f"[{domain}] Reached 90-day deletion threshold. Removing all subscriptions."
+            )
+            # Send deletion notification
+            await self.notification_service.send_cleanup_deletion(domain)
+
+            # Delete all subscriptions for this domain
+            from .database import SubscriptionRepository
+
+            subscription_repo = SubscriptionRepository(self.stream_repo.db)
+            deleted_count = await subscription_repo.delete_all_for_domain(domain)
+
+            # Delete the stream record
+            await self.stream_repo.delete(domain)
+
+            self.log.info(
+                f"[{domain}] Cleanup complete. Deleted {deleted_count} subscriptions and stream record."
+            )

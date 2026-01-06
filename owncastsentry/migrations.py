@@ -69,6 +69,21 @@ async def upgrade_v2(conn: Connection) -> None:
     await conn.execute("ALTER TABLE subscriptions_new RENAME TO subscriptions")
 
 
+@upgrade_table.register(description="Add failure_counter column for backoff and auto-cleanup")
+async def upgrade_v3(conn: Connection) -> None:
+    """
+    Runs migrations to upgrade database schema to version 3 format.
+    Version 3 adds the failure_counter column to track connection failures for backoff and auto-cleanup.
+
+    :param conn: A connection to run the v3 database migration on.
+    :return: Nothing.
+    """
+    # Add failure_counter column with default value of 0
+    await conn.execute(
+        """ALTER TABLE streams ADD COLUMN failure_counter INTEGER DEFAULT 0"""
+    )
+
+
 def get_upgrade_table() -> UpgradeTable:
     """
     Helper function for retrieving the upgrade table.

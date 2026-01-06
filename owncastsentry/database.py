@@ -74,6 +74,43 @@ class StreamRepository:
         result = await self.get_by_domain(domain)
         return result is not None
 
+    async def increment_failure_counter(self, domain: str) -> None:
+        """
+        Increment the failure counter for a stream by 1.
+
+        :param domain: The stream domain
+        :return: Nothing
+        """
+        query = """UPDATE streams
+                   SET failure_counter = failure_counter + 1
+                   WHERE domain=$1"""
+        async with self.db.acquire() as conn:
+            await conn.execute(query, domain)
+
+    async def reset_failure_counter(self, domain: str) -> None:
+        """
+        Reset the failure counter for a stream to 0.
+
+        :param domain: The stream domain
+        :return: Nothing
+        """
+        query = """UPDATE streams
+                   SET failure_counter = 0
+                   WHERE domain=$1"""
+        async with self.db.acquire() as conn:
+            await conn.execute(query, domain)
+
+    async def delete(self, domain: str) -> None:
+        """
+        Delete a stream record from the database.
+
+        :param domain: The stream domain
+        :return: Nothing
+        """
+        query = "DELETE FROM streams WHERE domain=$1"
+        async with self.db.acquire() as conn:
+            await conn.execute(query, domain)
+
 
 class SubscriptionRepository:
     """Repository for managing stream subscriptions in the database."""
@@ -158,3 +195,15 @@ class SubscriptionRepository:
         async with self.db.acquire() as conn:
             result = await conn.fetchrow(query, domain)
             return result[0]
+
+    async def delete_all_for_domain(self, domain: str) -> int:
+        """
+        Delete all subscriptions for a given stream domain.
+
+        :param domain: The stream domain
+        :return: Number of subscriptions deleted
+        """
+        query = "DELETE FROM subscriptions WHERE stream_domain=$1"
+        async with self.db.acquire() as conn:
+            result = await conn.execute(query, domain)
+            return result.rowcount
