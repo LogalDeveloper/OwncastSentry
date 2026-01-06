@@ -124,6 +124,18 @@ class SubscriptionRepository:
             results = await conn.fetch(query, domain)
             return [row["room_id"] for row in results]
 
+    async def get_subscribed_streams_for_room(self, room_id: str) -> List[str]:
+        """
+        Get all stream domains that a room is subscribed to.
+
+        :param room_id: The Matrix room ID
+        :return: List of stream domains
+        """
+        query = "SELECT stream_domain FROM subscriptions WHERE room_id=$1"
+        async with self.db.acquire() as conn:
+            results = await conn.fetch(query, room_id)
+            return [row["stream_domain"] for row in results]
+
     async def get_all_subscribed_domains(self) -> List[str]:
         """
         Get all unique stream domains that have at least one subscription.

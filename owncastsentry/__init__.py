@@ -103,6 +103,26 @@ class OwncastSentry(Plugin):
         """
         await self.command_handler.unsubscribe(evt, url)
 
+    @command.new(help="Lists all stream subscriptions in this room.")
+    async def subscriptions(self, evt: MessageEvent) -> None:
+        """
+        Command handler that delegates to CommandHandler.
+
+        :param evt: MessageEvent of the message calling the command.
+        :return: Nothing.
+        """
+        await self.command_handler.subscriptions(evt)
+
+    @command.new(help="Lists currently live streams in this room.")
+    async def live(self, evt: MessageEvent) -> None:
+        """
+        Command handler that delegates to CommandHandler.
+
+        :param evt: MessageEvent of the message calling the command.
+        :return: Nothing.
+        """
+        await self.command_handler.live(evt)
+
     async def stop(self) -> None:
         """
         Method called by Maubot upon shutdown of the instance.

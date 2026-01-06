@@ -5,7 +5,9 @@
 # Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 
 import sqlite3
+from datetime import datetime, timezone
 from maubot import MessageEvent
+from mautrix.types import TextMessageEventContent, MessageType
 
 from .owncast_client import OwncastClient
 from .database import StreamRepository, SubscriptionRepository
@@ -140,3 +142,150 @@ class CommandHandler:
                 + str(result)
                 + " instead. Something very bad may have happened!!!!"
             )
+
+    def _format_duration(self, timestamp_str: str) -> str:
+        """
+        Calculate and format the duration from a timestamp to now.
+
+        :param timestamp_str: ISO 8601 timestamp string
+        :return: Formatted duration string (e.g., "1 hour", "2 days")
+        """
+        try:
+            timestamp = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+            delta = now - timestamp
+
+            seconds = int(delta.total_seconds())
+            if seconds < 60:
+                return f"{seconds} second{'s' if seconds != 1 else ''}"
+            elif seconds < 3600:
+                minutes = seconds // 60
+                return f"{minutes} minute{'s' if minutes != 1 else ''}"
+            elif seconds < 86400:
+                hours = seconds // 3600
+                return f"{hours} hour{'s' if hours != 1 else ''}"
+            else:
+                days = seconds // 86400
+                return f"{days} day{'s' if days != 1 else ''}"
+        except Exception:
+            return "unknown duration"
+
+    async def subscriptions(self, evt: MessageEvent) -> None:
+        """
+        "!subscriptions" command handler for listing all stream subscriptions in the current room.
+
+        :param evt: MessageEvent of the message calling the command.
+        :return: Nothing.
+        """
+        # Get all stream domains this room is subscribed to
+        subscribed_domains = await self.subscription_repo.get_subscribed_streams_for_room(
+            evt.room_id
+        )
+
+        # Check if there are no subscriptions
+        if not subscribed_domains:
+            await evt.reply("This room is not subscribed to any Owncast instances.\n\nTo subscribe to an Owncast instance, use `!subscribe <domain>`", markdown=True)
+            return
+
+        # Build the response message body as Markdown
+        body_text = f"**Subscriptions for this room ({len(subscribed_domains)}):**\n\n"
+
+        for domain in subscribed_domains:
+            # Get the stream state from the database
+            stream_state = await self.stream_repo.get_by_domain(domain)
+
+            if stream_state is None:
+                # Stream exists in subscriptions but not in streams table (shouldn't happen)
+                body_text += f"- **{domain}**  \n"
+                body_text += f"  - Status: Unknown  \n"
+                body_text += f"  - Link: https://{domain}\n\n"
+                continue
+
+            # Determine stream name (use domain as fallback)
+            stream_name = stream_state.name if stream_state.name else domain
+
+            # Start building this stream's entry with stream name as main bullet
+            body_text += f"- **{stream_name}**  \n"
+
+            # Add title if stream is online (as a sub-bullet)
+            if stream_state.online and stream_state.title:
+                body_text += f"  - Title: {stream_state.title}  \n"
+
+            # Determine status and duration (as a sub-bullet)
+            if stream_state.online:
+                # Stream is online - use last_connect_time
+                if stream_state.last_connect_time:
+                    duration = self._format_duration(stream_state.last_connect_time)
+                    body_text += f"  - Status: Online for {duration}  \n"
+                else:
+                    body_text += f"  - Status: Online  \n"
+            else:
+                # Stream is offline - use last_disconnect_time
+                if stream_state.last_disconnect_time:
+                    duration = self._format_duration(stream_state.last_disconnect_time)
+                    body_text += f"  - Status: Offline for {duration}  \n"
+                else:
+                    body_text += f"  - Status: Offline  \n"
+
+            # Add stream link (as a sub-bullet)
+            body_text += f"  - Link: https://{domain}\n\n"
+
+        # Add help text for unsubscribing
+        body_text += "\nTo unsubscribe from any of these Owncast instances, use `!unsubscribe <domain>`"
+
+        # Send the response as Markdown
+        await evt.reply(body_text, markdown=True)
+
+    async def live(self, evt: MessageEvent) -> None:
+        """
+        "!live" command handler for listing only currently live streams in the current room.
+
+        :param evt: MessageEvent of the message calling the command.
+        :return: Nothing.
+        """
+        # Get all stream domains this room is subscribed to
+        subscribed_domains = await self.subscription_repo.get_subscribed_streams_for_room(
+            evt.room_id
+        )
+
+        # Check if there are no subscriptions
+        if not subscribed_domains:
+            await evt.reply("This room is not subscribed to any Owncast instances.\n\nTo subscribe to an Owncast instance, use `!subscribe <domain>`", markdown=True)
+            return
+
+        # Filter for only live streams
+        live_streams = []
+        for domain in subscribed_domains:
+            stream_state = await self.stream_repo.get_by_domain(domain)
+            if stream_state and stream_state.online:
+                live_streams.append((domain, stream_state))
+
+        # Check if there are no live streams
+        if not live_streams:
+            await evt.reply("No subscribed Owncast instances are currently live.\n\nUse `!subscriptions` to list all subscriptions.", markdown=True)
+            return
+
+        # Build the response message body as Markdown
+        body_text = f"**Live Owncast instances ({len(live_streams)}):**\n\n"
+
+        for domain, stream_state in live_streams:
+            # Determine stream name (use domain as fallback)
+            stream_name = stream_state.name if stream_state.name else domain
+
+            # Start building this stream's entry with stream name as main bullet
+            body_text += f"- **{stream_name}**  \n"
+
+            # Add title (should be present for live streams)
+            if stream_state.title:
+                body_text += f"  - Title: {stream_state.title}  \n"
+
+            # Add status with duration
+            if stream_state.last_connect_time:
+                duration = self._format_duration(stream_state.last_connect_time)
+                body_text += f"  - Online for {duration}  \n"
+
+            # Add stream link
+            body_text += f"  - Link: https://{domain}\n\n"
+
+        # Send the response as Markdown
+        await evt.reply(body_text.rstrip(), markdown=True)
