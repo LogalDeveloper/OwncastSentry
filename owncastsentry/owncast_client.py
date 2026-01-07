@@ -8,7 +8,7 @@ import aiohttp
 import json
 from typing import Optional
 
-from .models import StreamConfig
+from .models import StreamConfig, StreamState
 from .utils import OWNCAST_STATUS_PATH, OWNCAST_CONFIG_PATH, USER_AGENT
 
 
@@ -35,13 +35,13 @@ class OwncastClient:
             headers=headers, cookie_jar=cookie_jar, timeout=timeout, connector=connector
         )
 
-    async def get_stream_state(self, domain: str) -> Optional[dict]:
+    async def get_stream_state(self, domain: str) -> Optional[StreamState]:
         """
         Get the current stream state for a given domain.
         HTTPS on port 443 is assumed, no other protocols or ports are supported.
 
         :param domain: The domain (not URL) where the stream is hosted.
-        :return: A dictionary containing stream state if available, None if an error occurred.
+        :return: A StreamState with stream state if available, None if an error occurred.
         """
         self.log.debug(f"[{domain}] Fetching current stream state...")
         status_url = "https://" + domain + OWNCAST_STATUS_PATH
@@ -87,7 +87,7 @@ class OwncastClient:
                 )
                 return None
 
-        return new_state
+        return StreamState.from_api_response(new_state, domain)
 
     async def get_stream_config(self, domain: str) -> Optional[StreamConfig]:
         """

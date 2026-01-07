@@ -11,7 +11,7 @@ from typing import List
 from mautrix.types import TextMessageEventContent, MessageType
 
 from .database import SubscriptionRepository
-from .utils import SECONDS_BETWEEN_NOTIFICATIONS
+from .utils import SECONDS_BETWEEN_NOTIFICATIONS, sanitize_for_markdown
 
 
 class NotificationService:
@@ -130,24 +130,33 @@ class NotificationService:
         """
         # Use name if available, fallback to domain
         stream_name = name if name else domain
+        safe_stream_name = sanitize_for_markdown(stream_name)
 
         # Choose message based on notification type
         if title_change:
-            body_text = "📝 " + stream_name + " has changed its stream title!"
+            body_text = "📝 " + safe_stream_name + " has changed its stream title!"
         else:
-            body_text = "🎥 " + stream_name + " is now live!"
+            body_text = "🎥 " + safe_stream_name + " is now live!"
 
         # Add title if present
         if title != "":
-            body_text += "\nStream Title: " + title
+            safe_title = sanitize_for_markdown(title)
+            body_text += "\nStream Title: " + safe_title
 
         # Add stream URL
         body_text += "\n\nTo tune in, visit: https://" + domain + "/"
 
         # Add tags if present
         if tags and len(tags) > 0:
-            body_text += "\n\n"
-            body_text += " ".join("#" + tag for tag in tags)
+            safe_tags = []
+            for tag in tags:
+                safe_tag = sanitize_for_markdown(tag)
+                if safe_tag and not safe_tag.startswith('.'):
+                    safe_tags.append(safe_tag)
+
+            if safe_tags:
+                body_text += "\n\n"
+                body_text += " ".join("#" + tag for tag in safe_tags)
 
         return body_text
 

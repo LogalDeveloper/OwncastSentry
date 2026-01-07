@@ -98,10 +98,10 @@ class StreamMonitor:
         stream_config = None
 
         # Fetch the latest stream state from the server
-        new_state_dict = await self.owncast_client.get_stream_state(domain)
+        new_state = await self.owncast_client.get_stream_state(domain)
 
         # If the fetch failed, increment failure counter and skip the update
-        if new_state_dict is None:
+        if new_state is None:
             await self.stream_repo.increment_failure_counter(domain)
             self.log.warning(
                 f"[{domain}] Connection failure (counter={failure_counter + 1})"
@@ -130,7 +130,7 @@ class StreamMonitor:
 
         # Does the latest stream state have a last connect time and the old state not have one?
         if (
-            new_state_dict["lastConnectTime"] is not None
+            new_state.last_connect_time is not None
             and old_state.last_connect_time is None
         ):
             # Yes! This stream is now live.
@@ -153,12 +153,12 @@ class StreamMonitor:
                 # Yes. Has this stream been offline for a short amount of time?
                 if seconds_since_last_offline < TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN:
                     # Yes. Did the stream title change?
-                    if old_state.title != new_state_dict["streamTitle"]:
+                    if old_state.title != new_state.title:
                         # Yes. The stream was only down for a short time, send a special notification indicating the stream changed its name.
                         await self.notification_service.notify_stream_live(
                             domain,
                             stream_name,
-                            new_state_dict["streamTitle"],
+                            new_state.title,
                             stream_tags,
                             title_change=True,
                         )
@@ -172,7 +172,7 @@ class StreamMonitor:
                     await self.notification_service.notify_stream_live(
                         domain,
                         stream_name,
-                        new_state_dict["streamTitle"],
+                        new_state.title,
                         stream_tags,
                         title_change=False,
                     )
@@ -183,11 +183,11 @@ class StreamMonitor:
                 )
 
         if (
-            new_state_dict["lastConnectTime"] is not None
+            new_state.last_connect_time is not None
             and old_state.last_connect_time is not None
         ):
             # Did the stream title change mid-session?
-            if old_state.title != new_state_dict["streamTitle"]:
+            if old_state.title != new_state.title:
                 self.log.info(f"[{domain}] Stream title was changed!")
                 update_database = True
                 stream_config = await self.owncast_client.get_stream_config(domain)
@@ -208,7 +208,7 @@ class StreamMonitor:
                     await self.notification_service.notify_stream_live(
                         domain,
                         stream_name,
-                        new_state_dict["streamTitle"],
+                        new_state.title,
                         stream_tags,
                         title_change=False,
                     )
@@ -217,14 +217,14 @@ class StreamMonitor:
                     await self.notification_service.notify_stream_live(
                         domain,
                         stream_name,
-                        new_state_dict["streamTitle"],
+                        new_state.title,
                         stream_tags,
                         title_change=True,
                     )
 
         # Does the latest stream state no longer have a last connect time but the old state does?
         elif (
-            new_state_dict["lastConnectTime"] is None
+            new_state.last_connect_time is None
             and old_state.last_connect_time is not None
         ):
             # Yep. This stream is now offline. Log it.
@@ -246,13 +246,13 @@ class StreamMonitor:
 
             self.log.debug(f"[{domain}] Updating stream state in database...")
 
-            # Create updated state object
+            # Create updated state object (title already truncated in new_state)
             updated_state = StreamState(
                 domain=domain,
                 name=stream_name,
-                title=new_state_dict["streamTitle"],
-                last_connect_time=new_state_dict["lastConnectTime"],
-                last_disconnect_time=new_state_dict["lastDisconnectTime"],
+                title=new_state.title,
+                last_connect_time=new_state.last_connect_time,
+                last_disconnect_time=new_state.last_disconnect_time,
             )
 
             await self.stream_repo.update(updated_state)

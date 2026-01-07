@@ -11,7 +11,7 @@ from mautrix.types import TextMessageEventContent, MessageType
 
 from .owncast_client import OwncastClient
 from .database import StreamRepository, SubscriptionRepository
-from .utils import domainify
+from .utils import domainify, sanitize_for_markdown
 
 
 class CommandHandler:
@@ -203,13 +203,15 @@ class CommandHandler:
 
             # Determine stream name (use domain as fallback)
             stream_name = stream_state.name if stream_state.name else domain
+            safe_stream_name = sanitize_for_markdown(stream_name)
 
             # Start building this stream's entry with stream name as main bullet
-            body_text += f"- **{stream_name}**  \n"
+            body_text += f"- **{safe_stream_name}**  \n"
 
             # Add title if stream is online (as a sub-bullet)
             if stream_state.online and stream_state.title:
-                body_text += f"  - Title: {stream_state.title}  \n"
+                safe_title = sanitize_for_markdown(stream_state.title)
+                body_text += f"  - Title: {safe_title}  \n"
 
             # Determine status and duration (as a sub-bullet)
             if stream_state.online:
@@ -271,13 +273,15 @@ class CommandHandler:
         for domain, stream_state in live_streams:
             # Determine stream name (use domain as fallback)
             stream_name = stream_state.name if stream_state.name else domain
+            safe_stream_name = sanitize_for_markdown(stream_name)
 
             # Start building this stream's entry with stream name as main bullet
-            body_text += f"- **{stream_name}**  \n"
+            body_text += f"- **{safe_stream_name}**  \n"
 
             # Add title (should be present for live streams)
             if stream_state.title:
-                body_text += f"  - Title: {stream_state.title}  \n"
+                safe_title = sanitize_for_markdown(stream_state.title)
+                body_text += f"  - Title: {safe_title}  \n"
 
             # Add status with duration
             if stream_state.last_connect_time:

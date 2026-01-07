@@ -25,6 +25,24 @@ class StreamState:
         return self.last_connect_time is not None
 
     @classmethod
+    def from_api_response(cls, response: dict, domain: str) -> "StreamState":
+        """
+        Creates a StreamState from an API response.
+
+        :param response: API response as a dictionary (camelCase keys)
+        :param domain: The stream domain
+        :return: StreamState instance
+        """
+        from .utils import truncate, MAX_STREAM_TITLE_LENGTH
+
+        return cls(
+            domain=domain,
+            title=truncate(response.get("streamTitle", ""), MAX_STREAM_TITLE_LENGTH),
+            last_connect_time=response.get("lastConnectTime"),
+            last_disconnect_time=response.get("lastDisconnectTime"),
+        )
+
+    @classmethod
     def from_db_row(cls, row: dict) -> "StreamState":
         """
         Creates a StreamState from a database row.
@@ -62,4 +80,13 @@ class StreamConfig:
         :param response: API response as a dictionary
         :return: StreamConfig instance
         """
-        return cls(name=response.get("name", ""), tags=response.get("tags", []))
+        from .utils import truncate, MAX_INSTANCE_TITLE_LENGTH, MAX_TAG_LENGTH
+
+        # Truncate instance name to max length
+        name = truncate(response.get("name", ""), MAX_INSTANCE_TITLE_LENGTH)
+
+        # Truncate each tag to max length
+        raw_tags = response.get("tags", [])
+        tags = [truncate(tag, MAX_TAG_LENGTH) for tag in raw_tags]
+
+        return cls(name=name, tags=tags)
