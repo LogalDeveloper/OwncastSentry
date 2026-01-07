@@ -33,6 +33,9 @@ TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN = 7 * 60  # 7 minutes in seconds
 CLEANUP_WARNING_THRESHOLD = 83 * 24 * 60  # 119,520 cycles = 83 days
 CLEANUP_DELETE_THRESHOLD = 90 * 24 * 60  # 129,600 cycles = 90 days
 
+# Failure counter threshold for treating stream status as "unknown"
+UNKNOWN_STATUS_THRESHOLD = 15
+
 # Maximum field lengths based on Owncast's configuration
 # Source: https://github.com/owncast/owncast/blob/master/web/utils/config-constants.tsx
 MAX_INSTANCE_TITLE_LENGTH = 255  # Server Name (line 81)

@@ -5,7 +5,16 @@
 # Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Optional, List
+
+
+class StreamStatus(Enum):
+    """Represents the status of a stream."""
+
+    ONLINE = "online"
+    OFFLINE = "offline"
+    UNKNOWN = "unknown"
 
 
 @dataclass
@@ -20,9 +29,16 @@ class StreamState:
     failure_counter: int = 0
 
     @property
-    def online(self) -> bool:
-        """Returns True if the stream is currently online."""
-        return self.last_connect_time is not None
+    def status(self) -> StreamStatus:
+        """Returns the stream status considering failure_counter."""
+        from .utils import UNKNOWN_STATUS_THRESHOLD
+
+        if self.failure_counter > UNKNOWN_STATUS_THRESHOLD:
+            return StreamStatus.UNKNOWN
+        elif self.last_connect_time is not None:
+            return StreamStatus.ONLINE
+        else:
+            return StreamStatus.OFFLINE
 
     @classmethod
     def from_api_response(cls, response: dict, domain: str) -> "StreamState":

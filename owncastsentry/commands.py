@@ -11,6 +11,7 @@ from mautrix.types import TextMessageEventContent, MessageType
 
 from .owncast_client import OwncastClient
 from .database import StreamRepository, SubscriptionRepository
+from .models import StreamStatus
 from .utils import domainify, sanitize_for_markdown
 
 
@@ -209,18 +210,21 @@ class CommandHandler:
             body_text += f"- **{safe_stream_name}**  \n"
 
             # Add title if stream is online (as a sub-bullet)
-            if stream_state.online and stream_state.title:
+            if stream_state.status == StreamStatus.ONLINE and stream_state.title:
                 safe_title = sanitize_for_markdown(stream_state.title)
                 body_text += f"  - Title: {safe_title}  \n"
 
             # Determine status and duration (as a sub-bullet)
-            if stream_state.online:
+            if stream_state.status == StreamStatus.ONLINE:
                 # Stream is online - use last_connect_time
                 if stream_state.last_connect_time:
                     duration = self._format_duration(stream_state.last_connect_time)
                     body_text += f"  - Status: Online for {duration}  \n"
                 else:
                     body_text += f"  - Status: Online  \n"
+            elif stream_state.status == StreamStatus.UNKNOWN:
+                # Stream status is unknown - instance unreachable
+                body_text += f"  - Status: Unknown (instance unreachable)  \n"
             else:
                 # Stream is offline - use last_disconnect_time
                 if stream_state.last_disconnect_time:
@@ -255,11 +259,11 @@ class CommandHandler:
             await evt.reply("This room is not subscribed to any Owncast instances.\n\nTo subscribe to an Owncast instance, use `!subscribe <domain>`", markdown=True)
             return
 
-        # Filter for only live streams
+        # Filter for only live streams (exclude unknown status)
         live_streams = []
         for domain in subscribed_domains:
             stream_state = await self.stream_repo.get_by_domain(domain)
-            if stream_state and stream_state.online:
+            if stream_state and stream_state.status == StreamStatus.ONLINE:
                 live_streams.append((domain, stream_state))
 
         # Check if there are no live streams
