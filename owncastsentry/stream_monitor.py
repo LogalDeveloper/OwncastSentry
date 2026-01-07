@@ -284,8 +284,6 @@ class StreamMonitor:
             await self.notification_service.send_cleanup_deletion(domain)
 
             # Delete all subscriptions for this domain
-            from .database import SubscriptionRepository
-
             subscription_repo = SubscriptionRepository(self.stream_repo.db)
             deleted_count = await subscription_repo.delete_all_for_domain(domain)
 

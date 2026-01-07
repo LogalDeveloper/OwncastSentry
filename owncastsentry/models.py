@@ -8,6 +8,14 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, List
 
+from .utils import (
+    MAX_INSTANCE_TITLE_LENGTH,
+    MAX_STREAM_TITLE_LENGTH,
+    MAX_TAG_LENGTH,
+    UNKNOWN_STATUS_THRESHOLD,
+    truncate,
+)
+
 
 class StreamStatus(Enum):
     """Represents the status of a stream."""
@@ -31,8 +39,6 @@ class StreamState:
     @property
     def status(self) -> StreamStatus:
         """Returns the stream status considering failure_counter."""
-        from .utils import UNKNOWN_STATUS_THRESHOLD
-
         if self.failure_counter > UNKNOWN_STATUS_THRESHOLD:
             return StreamStatus.UNKNOWN
         elif self.last_connect_time is not None:
@@ -49,8 +55,6 @@ class StreamState:
         :param domain: The stream domain
         :return: StreamState instance
         """
-        from .utils import truncate, MAX_STREAM_TITLE_LENGTH
-
         return cls(
             domain=domain,
             title=truncate(response.get("streamTitle", ""), MAX_STREAM_TITLE_LENGTH),
@@ -96,8 +100,6 @@ class StreamConfig:
         :param response: API response as a dictionary
         :return: StreamConfig instance
         """
-        from .utils import truncate, MAX_INSTANCE_TITLE_LENGTH, MAX_TAG_LENGTH
-
         # Truncate instance name to max length
         name = truncate(response.get("name", ""), MAX_INSTANCE_TITLE_LENGTH)
 
