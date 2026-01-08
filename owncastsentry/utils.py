@@ -157,6 +157,28 @@ def escape_markdown(text: str) -> str:
     return escaped_text
 
 
+def sanitize_for_plain_text(text: str) -> str:
+    """
+    Sanitize text for plain text rendering.
+
+    Removes newlines and normalizes whitespace without escaping special characters.
+    Use this for plain text notifications where escaping would show literal backslashes.
+
+    :param text: The text to sanitize
+    :return: Sanitized text
+    """
+    if not text:
+        return text
+
+    # Remove newlines and carriage returns to prevent multi-line injection
+    sanitized = text.replace('\n', ' ').replace('\r', ' ')
+
+    # Collapse multiple spaces into single space
+    sanitized = ' '.join(sanitized.split())
+
+    return sanitized
+
+
 def sanitize_for_markdown(text: str) -> str:
     """
     Sanitize text for safe Markdown rendering.
