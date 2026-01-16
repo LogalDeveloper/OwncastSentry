@@ -4,9 +4,12 @@
 #
 # Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 
+from typing import Type
+
 from maubot import Plugin, MessageEvent
 from maubot.handlers import command
 from mautrix.util.async_db import UpgradeTable
+from mautrix.util.config import BaseProxyConfig
 
 from .migrations import get_upgrade_table
 from .owncast_client import OwncastClient
@@ -14,6 +17,8 @@ from .database import StreamRepository, SubscriptionRepository
 from .notification_service import NotificationService
 from .stream_monitor import StreamMonitor
 from .commands import CommandHandler
+from .config import Config
+from .health_checker import HealthChecker
 
 
 class OwncastSentry(Plugin):
@@ -28,6 +33,15 @@ class OwncastSentry(Plugin):
         """
         return get_upgrade_table()
 
+    @classmethod
+    def get_config_class(cls) -> Type[BaseProxyConfig]:
+        """
+        Helper method for telling Maubot about our configuration class.
+
+        :return: The Config class.
+        """
+        return Config
+
     async def start(self) -> None:
         """
         Method called by Maubot upon startup of the instance.
@@ -35,6 +49,9 @@ class OwncastSentry(Plugin):
 
         :return: Nothing.
         """
+        # Load configuration
+        self.config.load_and_update()
+
         # Initialize the Owncast API client
         self.owncast_client = OwncastClient(self.log)
 
@@ -55,6 +72,13 @@ class OwncastSentry(Plugin):
             self.log,
         )
 
+        # Initialize health checker
+        self.health_checker = HealthChecker(
+            self.database,
+            self.owncast_client,
+            self.log,
+        )
+
         # Initialize command handler
         self.command_handler = CommandHandler(
             self.owncast_client,
@@ -69,15 +93,21 @@ class OwncastSentry(Plugin):
     async def _update_all_stream_states(self) -> None:
         """
         Wrapper method for updating all stream states.
-        Fetches list of subscribed domains and delegates to StreamMonitor.
+        Fetches list of subscribed domains, delegates to StreamMonitor, and performs health check.
 
         :return: Nothing.
         """
         # Get list of all stream domains with active subscriptions
         subscribed_domains = await self.subscription_repo.get_all_subscribed_domains()
 
-        # Delegate to stream monitor
-        await self.stream_monitor.update_all_streams(subscribed_domains)
+        # Delegate to stream monitor and get results
+        update_result = await self.stream_monitor.update_all_streams(subscribed_domains)
+
+        # Perform health check
+        await self.health_checker.perform_health_check(
+            update_result,
+            self.config.health_check_endpoint,
+        )
 
     @command.new(help="Subscribes to a new Owncast stream.")
     @command.argument("url")

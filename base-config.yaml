@@ -1,0 +1,4 @@
+# Health check endpoint URL.
+# If configured, a GET request will be sent to this URL after each successful update cycle.
+# Leave empty to disable health check reporting.
+health_check_endpoint: ""
