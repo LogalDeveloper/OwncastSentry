@@ -179,6 +179,14 @@ class NotificationService:
 
         return body_text
 
+    def get_last_notification_time(self, domain: str) -> float:
+        """Get the timestamp of the last notification sent for a domain.
+
+        :param domain: The stream domain.
+        :return: Unix timestamp of last notification, or 0 if never notified.
+        """
+        return self.notification_timers_cache.get(domain, 0)
+
     def _can_notify(self, domain: str) -> bool:
         """Check if enough time has passed to send another notification.
 

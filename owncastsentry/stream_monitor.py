@@ -163,8 +163,6 @@ class StreamMonitor:
         # Initialize timer cache entries to prevent KeyError on first access
         if domain not in self.offline_timer_cache:
             self.offline_timer_cache[domain] = 0
-        if domain not in self.notification_service.notification_timers_cache:
-            self.notification_service.notification_timers_cache[domain] = 0
 
         # Does the last known stream state lack connect/disconnect?
         if (
@@ -257,7 +255,7 @@ class StreamMonitor:
                 # instead of a title change to avoid confusion.
                 if (
                     self.offline_timer_cache[domain]
-                    > self.notification_service.notification_timers_cache[domain]
+                    > self.notification_service.get_last_notification_time(domain)
                 ):
                     await self.notification_service.notify_stream_live(
                         domain,
