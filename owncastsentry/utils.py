@@ -79,19 +79,19 @@ def should_query_stream(failure_counter: int) -> bool:
     :return: True if the stream should be queried this cycle.
     """
     if failure_counter <= 4:
-        # Query every 60s for first 5 minutes (counters 0-4)
+        # Query every cycle for first 5 minutes (counters 0-4)
         return True
     if failure_counter <= 9:
-        # Query every 2 minutes for next 5 minutes (counters 5-9)
-        return (failure_counter * 60) % 120 == 0
+        # Query every 2nd cycle for next 5 minutes (counters 5-9)
+        return failure_counter % 2 == 0
     if failure_counter <= 14:
-        # Query every 3 minutes for next 5 minutes (counters 10-14)
-        return (failure_counter * 60) % 180 == 0
+        # Query every 3rd cycle for next 5 minutes (counters 10-14)
+        return failure_counter % 3 == 0
     if failure_counter <= 29:
-        # Query every 5 minutes for next 15 minutes (counters 15-29)
-        return (failure_counter * 60) % 300 == 0
-    # Query every 15 minutes after 30 minutes (counter 30+)
-    return (failure_counter * 60) % 900 == 0
+        # Query every 5th cycle for next 15 minutes (counters 15-29)
+        return failure_counter % 5 == 0
+    # Query every 15th cycle after 30 minutes (counter 30+)
+    return failure_counter % 15 == 0
 
 
 def domainify(url: str) -> str:
