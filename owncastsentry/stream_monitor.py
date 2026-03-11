@@ -253,10 +253,9 @@ class StreamMonitor:
                 # Was the last notification sent before the stream
                 # last went offline? If so, send a regular go-live
                 # instead of a title change to avoid confusion.
-                if (
-                    self.offline_timer_cache[domain]
-                    > self.notification_service.get_last_notification_time(domain)
-                ):
+                if self.offline_timer_cache[
+                    domain
+                ] > self.notification_service.get_last_notification_time(domain):
                     await self.notification_service.notify_stream_live(
                         domain,
                         stream_name,
