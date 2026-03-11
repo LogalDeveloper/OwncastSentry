@@ -18,7 +18,6 @@ import asyncio
 import time
 from typing import TYPE_CHECKING
 
-from .database import SubscriptionRepository
 from .health_checker import UpdateResult
 from .models import StreamState
 from .utils import (
@@ -31,7 +30,7 @@ from .utils import (
 if TYPE_CHECKING:
     import logging
 
-    from .database import StreamRepository
+    from .database import StreamRepository, SubscriptionRepository
     from .notification_service import NotificationService
     from .owncast_client import OwncastClient
 
@@ -43,6 +42,7 @@ class StreamMonitor:
         self,
         owncast_client: OwncastClient,
         stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
         notification_service: NotificationService,
         logger: logging.Logger,
     ) -> None:
@@ -50,11 +50,13 @@ class StreamMonitor:
 
         :param owncast_client: Client for making API calls to Owncast instances.
         :param stream_repo: Repository for stream data.
+        :param subscription_repo: Repository for subscription data.
         :param notification_service: Service for sending notifications.
         :param logger: Logger instance for debugging.
         """
         self.owncast_client = owncast_client
         self.stream_repo = stream_repo
+        self.subscription_repo = subscription_repo
         self.notification_service = notification_service
         self.log = logger
 
@@ -336,8 +338,7 @@ class StreamMonitor:
             await self.notification_service.send_cleanup_deletion(domain)
 
             # Delete all subscriptions for this domain
-            subscription_repo = SubscriptionRepository(self.stream_repo.db)
-            deleted_count = await subscription_repo.delete_all_for_domain(domain)
+            deleted_count = await self.subscription_repo.delete_all_for_domain(domain)
 
             # Delete the stream record
             await self.stream_repo.delete(domain)

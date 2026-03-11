@@ -73,6 +73,7 @@ class OwncastSentry(Plugin):
         self.stream_monitor = StreamMonitor(
             self.owncast_client,
             self.stream_repo,
+            self.subscription_repo,
             self.notification_service,
             self.log,
         )
