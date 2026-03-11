@@ -1,15 +1,28 @@
 # Copyright 2026 Logan Fick
 #
-# Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at: https://www.apache.org/licenses/LICENSE-2.0
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-import logging
+"""Health checking service for OwncastSentry."""
+
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from mautrix.util.async_db import Database
+if TYPE_CHECKING:
+    import logging
 
-from .owncast_client import OwncastClient
+    from mautrix.util.async_db import Database
+
+    from .owncast_client import OwncastClient
 
 
 @dataclass
@@ -22,8 +35,7 @@ class UpdateResult:
 
     @property
     def http_healthy(self) -> bool:
-        """
-        Determine HTTP health based on update results.
+        """Determine HTTP health based on update results.
 
         HTTP is considered healthy if:
         - No streams are subscribed (nothing to check), OR
@@ -45,8 +57,7 @@ class HealthStatus:
 
     @property
     def is_healthy(self) -> bool:
-        """
-        Check if all health components are healthy.
+        """Check if all health components are healthy.
 
         :return: True if all checks pass.
         """
@@ -62,25 +73,23 @@ class HealthChecker:
         owncast_client: OwncastClient,
         logger: logging.Logger,
     ):
-        """
-        Initialize the health checker.
+        """Initialize the health checker.
 
         :param database: The maubot database instance.
         :param owncast_client: Client for making HTTP requests.
-        :param logger: Logger instance.
+        :param logger: Logger instance for debugging.
         """
         self.db = database
         self.owncast_client = owncast_client
         self.log = logger
 
     async def check_database(self) -> bool:
-        """
-        Check if the database is functioning by executing a simple query.
+        """Check if the database is functioning by executing a simple query.
 
         :return: True if database is healthy, False otherwise.
         """
         try:
-            async with self.db.acquire() as conn:
+            async with self.db.acquire() as conn:  # type: ignore[var-annotated]
                 await conn.fetchval("SELECT 1")
             return True
         except Exception as e:
@@ -92,12 +101,10 @@ class HealthChecker:
         update_result: UpdateResult,
         endpoint: str,
     ) -> None:
-        """
-        Perform health check and report to configured endpoint if all healthy.
+        """Perform health check and report to configured endpoint if all healthy.
 
         :param update_result: Result of the stream update cycle.
         :param endpoint: Health check endpoint URL (empty string to skip reporting).
-        :return: Nothing.
         """
         # Check database health
         database_healthy = await self.check_database()
@@ -135,11 +142,9 @@ class HealthChecker:
         await self._send_health_report(endpoint)
 
     async def _send_health_report(self, endpoint: str) -> None:
-        """
-        Send a GET request to the health check endpoint.
+        """Send a GET request to the health check endpoint.
 
         :param endpoint: The endpoint URL.
-        :return: Nothing.
         """
         try:
             async with self.owncast_client.session.get(
@@ -151,7 +156,8 @@ class HealthChecker:
                     )
                 else:
                     self.log.warning(
-                        f"Health check endpoint returned non-success status: {response.status}"
+                        "Health check endpoint returned "
+                        f"non-success status: {response.status}"
                     )
         except Exception as e:
             self.log.warning(f"Failed to report health check to endpoint: {e}")

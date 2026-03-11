@@ -1,23 +1,39 @@
 # Copyright 2026 Logan Fick
 #
-# Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at: https://www.apache.org/licenses/LICENSE-2.0
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Stream monitoring service for OwncastSentry."""
 
 import asyncio
 import time
+from typing import TYPE_CHECKING
 
-from .owncast_client import OwncastClient
-from .database import StreamRepository, SubscriptionRepository
-from .notification_service import NotificationService
+from .database import SubscriptionRepository
+from .health_checker import UpdateResult
 from .models import StreamState
 from .utils import (
-    TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN,
-    CLEANUP_WARNING_THRESHOLD,
     CLEANUP_DELETE_THRESHOLD,
+    CLEANUP_WARNING_THRESHOLD,
+    TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN,
     should_query_stream,
 )
-from .health_checker import UpdateResult
+
+if TYPE_CHECKING:
+    import logging
+
+    from .database import StreamRepository
+    from .notification_service import NotificationService
+    from .owncast_client import OwncastClient
 
 
 class StreamMonitor:
@@ -28,15 +44,14 @@ class StreamMonitor:
         owncast_client: OwncastClient,
         stream_repo: StreamRepository,
         notification_service: NotificationService,
-        logger,
-    ):
-        """
-        Initialize the stream monitor.
+        logger: logging.Logger,
+    ) -> None:
+        """Initialize the stream monitor.
 
-        :param owncast_client: Client for making API calls to Owncast instances
-        :param stream_repo: Repository for stream data
-        :param notification_service: Service for sending notifications
-        :param logger: Logger instance
+        :param owncast_client: Client for making API calls to Owncast instances.
+        :param stream_repo: Repository for stream data.
+        :param notification_service: Service for sending notifications.
+        :param logger: Logger instance for debugging.
         """
         self.owncast_client = owncast_client
         self.stream_repo = stream_repo
@@ -44,12 +59,13 @@ class StreamMonitor:
         self.log = logger
 
         # Cache for tracking when streams last went offline
-        self.offline_timer_cache = {}
+        self.offline_timer_cache: dict[str, float] = {}
 
     async def update_all_streams(self, subscribed_domains: list[str]) -> UpdateResult:
-        """
-        Checks the status of all streams with active subscriptions.
-        Updates for all streams are performed asynchronously, with the method returning when the slowest update completes.
+        """Check the status of all streams with active subscriptions.
+
+        Updates for all streams are performed asynchronously, with the
+        method returning when the slowest update completes.
 
         :param subscribed_domains: List of stream domains to update.
         :return: UpdateResult with success/failure counts.
@@ -58,10 +74,11 @@ class StreamMonitor:
 
         total_streams = len(subscribed_domains)
 
-        # Build a list of async tasks which update the state for each stream domain
-        tasks = []
-        for domain in subscribed_domains:
-            tasks.append(asyncio.create_task(self.update_stream(domain)))
+        # Build a list of async tasks for each stream domain
+        tasks = [
+            asyncio.create_task(self.update_stream(domain))
+            for domain in subscribed_domains
+        ]
 
         # Run the tasks in parallel and collect results
         results = await asyncio.gather(*tasks)
@@ -82,12 +99,14 @@ class StreamMonitor:
         )
 
     async def update_stream(self, domain: str) -> bool:
-        """
-        Updates the state of a given stream domain and sends notifications to subscribed Matrix rooms if it goes live.
-        Implements progressive backoff for connection failures and auto-cleanup for dead instances.
+        """Update the state of a stream and send notifications as needed.
+
+        Sends notifications to subscribed Matrix rooms if a stream goes
+        live. Implements progressive backoff for connection failures and
+        auto-cleanup for dead instances.
 
         :param domain: The domain of the stream to update.
-        :return: True if the stream check succeeded (or was skipped due to backoff), False on connection failure.
+        :return: True if check succeeded or was skipped, False on failure.
         """
         # Fetch the current stream state from database to check failure_counter
         old_state = await self.stream_repo.get_by_domain(domain)
@@ -98,21 +117,28 @@ class StreamMonitor:
             # Skip this cycle, increment counter to track time passage
             await self.stream_repo.increment_failure_counter(domain)
             self.log.debug(
-                f"[{domain}] Skipping query due to backoff (counter={failure_counter + 1})"
+                f"[{domain}] Skipping query due to backoff "
+                f"(counter={failure_counter + 1})"
             )
             # Check cleanup thresholds even when skipping query
             await self._check_cleanup_thresholds(domain, failure_counter + 1)
             # Backoff is expected behavior, not a failure
             return True
 
-        # A flag indicating whether this is the first state update of a brand-new stream to avoid sending notifications if its already live.
+        # Defensive check: old_state should always exist here since
+        # the stream is in the DB
+        if old_state is None:
+            return False
+
+        # Flag: first state update of a brand-new stream to avoid
+        # sending notifications if it's already live.
         first_update = False
 
-        # A flag indicating whether to update the stream's state in the database.
-        # Used to avoid writing to the database when a stream's state hasn't changed at all.
+        # Flag: whether to update the stream's state in the database.
+        # Used to avoid writes when state hasn't changed at all.
         update_database = False
 
-        # Holds the stream's latest configuration, if fetched and deemed necessary during the update process.
+        # The stream's latest configuration, if fetched during update.
         stream_config = None
 
         # Fetch the latest stream state from the server
@@ -132,13 +158,13 @@ class StreamMonitor:
         # Fetch succeeded! Reset failure counter
         await self.stream_repo.reset_failure_counter(domain)
 
-        # Fix possible race conditions with timers
+        # Initialize timer cache entries to prevent KeyError on first access
         if domain not in self.offline_timer_cache:
             self.offline_timer_cache[domain] = 0
         if domain not in self.notification_service.notification_timers_cache:
             self.notification_service.notification_timers_cache[domain] = 0
 
-        # Does the last known stream state not have a value for the last connect and disconnect time?
+        # Does the last known stream state lack connect/disconnect?
         if (
             old_state.last_connect_time is None
             and old_state.last_disconnect_time is None
@@ -147,7 +173,7 @@ class StreamMonitor:
             update_database = True
             first_update = True
 
-        # Does the latest stream state have a last connect time and the old state not have one?
+        # Does the new state have a connect time but the old one not?
         if (
             new_state.last_connect_time is not None
             and old_state.last_connect_time is None
@@ -158,47 +184,56 @@ class StreamMonitor:
 
             self.log.info(f"[{domain}] Stream is now live!")
 
-            # Calculate how many seconds since the stream last went offline
+            # Calculate seconds since the stream last went offline
             seconds_since_last_offline = round(
                 time.time() - self.offline_timer_cache[domain]
             )
 
-            # Have we queried this stream before? (In other words, is this not the first state update ever?)
+            # Have we queried this stream before?
             if not first_update:
                 # Use fallback values if config fetch failed
                 stream_name = stream_config.name if stream_config else domain
                 stream_tags = stream_config.tags if stream_config else []
 
-                # Yes. Has this stream been offline for a short amount of time?
+                # Has this stream been offline for a short time?
                 if seconds_since_last_offline < TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN:
-                    # Yes. Did the stream title change?
+                    # Did the stream title change?
                     if old_state.title != new_state.title:
-                        # Yes. The stream was only down for a short time, send a special notification indicating the stream changed its name.
+                        # Stream was briefly down; send title
+                        # change notification.
                         await self.notification_service.notify_stream_live(
                             domain,
                             stream_name,
-                            new_state.title,
+                            new_state.title or "",
                             stream_tags,
                             title_change=True,
                         )
                     else:
-                        # No. The stream was only down for a short time and didn't change its title. Don't send a notification.
+                        # Briefly offline, no title change. Skip.
                         self.log.info(
-                            f"[{domain}] Not sending notifications. Stream was only offline for {seconds_since_last_offline} of {TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN} seconds and did not change its title."
+                            f"[{domain}] Not sending "
+                            f"notifications. Stream was only "
+                            f"offline for "
+                            f"{seconds_since_last_offline} of "
+                            f"{TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN}"
+                            f" seconds and did not change its "
+                            f"title."
                         )
                 else:
-                    # This stream has been offline for a while. Send a normal notification.
+                    # Offline for a while. Send a normal notification.
                     await self.notification_service.notify_stream_live(
                         domain,
                         stream_name,
-                        new_state.title,
+                        new_state.title or "",
                         stream_tags,
                         title_change=False,
                     )
             else:
                 # No, this is the first time we're querying
                 self.log.info(
-                    f"[{domain}] Not sending notifications. This is the first state update for this stream."
+                    f"[{domain}] Not sending notifications. "
+                    f"This is the first state update for "
+                    f"this stream."
                 )
 
         if (
@@ -215,19 +250,17 @@ class StreamMonitor:
                 stream_name = stream_config.name if stream_config else domain
                 stream_tags = stream_config.tags if stream_config else []
 
-                # This is a fun case to account for... Let's try and explain this.
-                # Was the last time this stream sent a notification before it last went offline?
+                # Was the last notification sent before the stream
+                # last went offline? If so, send a regular go-live
+                # instead of a title change to avoid confusion.
                 if (
                     self.offline_timer_cache[domain]
                     > self.notification_service.notification_timers_cache[domain]
                 ):
-                    # Yes. Send a regular go live notification.
-                    # Why? A title change notification could be confusing to users in this case.
-                    # How? If a stream goes offline before its next allowed notification, it'll get rate limited. If it then changes its title, this part of the code will send a title change notification. This can be a little confusing, so override to a normal go live notification in this case.
                     await self.notification_service.notify_stream_live(
                         domain,
                         stream_name,
-                        new_state.title,
+                        new_state.title or "",
                         stream_tags,
                         title_change=False,
                     )
@@ -236,12 +269,12 @@ class StreamMonitor:
                     await self.notification_service.notify_stream_live(
                         domain,
                         stream_name,
-                        new_state.title,
+                        new_state.title or "",
                         stream_tags,
                         title_change=True,
                     )
 
-        # Does the latest stream state no longer have a last connect time but the old state does?
+        # Did the stream go offline (old had connect, new doesn't)?
         elif (
             new_state.last_connect_time is None
             and old_state.last_connect_time is not None
@@ -254,9 +287,9 @@ class StreamMonitor:
             else:
                 self.log.info(f"[{domain}] Stream is now offline.")
 
-        # Update the database with the current stream state, if needed.
+        # Update the database with current stream state, if needed.
         if update_database:
-            # Ensure we have the stream config before updating the database
+            # Ensure we have the stream config before updating
             if stream_config is None:
                 stream_config = await self.owncast_client.get_stream_config(domain)
 
@@ -281,12 +314,10 @@ class StreamMonitor:
         return True
 
     async def _check_cleanup_thresholds(self, domain: str, counter: int) -> None:
-        """
-        Check if a domain has hit cleanup warning or deletion thresholds.
+        """Check if a domain hit cleanup warning or deletion thresholds.
 
-        :param domain: The domain to check
-        :param counter: The current failure counter value
-        :return: Nothing
+        :param domain: The domain to check.
+        :param counter: The current failure counter value.
         """
         # Check for 83-day warning threshold
         if counter == CLEANUP_WARNING_THRESHOLD:
@@ -298,7 +329,8 @@ class StreamMonitor:
         # Check for 90-day deletion threshold
         if counter >= CLEANUP_DELETE_THRESHOLD:
             self.log.warning(
-                f"[{domain}] Reached 90-day deletion threshold. Removing all subscriptions."
+                f"[{domain}] Reached 90-day deletion threshold."
+                f" Removing all subscriptions."
             )
             # Send deletion notification
             await self.notification_service.send_cleanup_deletion(domain)
@@ -311,5 +343,7 @@ class StreamMonitor:
             await self.stream_repo.delete(domain)
 
             self.log.info(
-                f"[{domain}] Cleanup complete. Deleted {deleted_count} subscriptions and stream record."
+                f"[{domain}] Cleanup complete. "
+                f"Deleted {deleted_count} subscriptions "
+                f"and stream record."
             )

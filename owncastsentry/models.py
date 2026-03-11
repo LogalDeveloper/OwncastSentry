@@ -1,12 +1,22 @@
 # Copyright 2026 Logan Fick
 #
-# Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at: https://www.apache.org/licenses/LICENSE-2.0
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-from dataclasses import dataclass
+"""Data models for OwncastSentry."""
+
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, List
+from typing import Any
 
 from .utils import (
     MAX_INSTANCE_TITLE_LENGTH,
@@ -30,30 +40,32 @@ class StreamState:
     """Represents the state of an Owncast stream."""
 
     domain: str
-    name: Optional[str] = None
-    title: Optional[str] = None
-    last_connect_time: Optional[str] = None
-    last_disconnect_time: Optional[str] = None
+    name: str | None = None
+    title: str | None = None
+    last_connect_time: str | None = None
+    last_disconnect_time: str | None = None
     failure_counter: int = 0
 
     @property
     def status(self) -> StreamStatus:
-        """Returns the stream status considering failure_counter."""
+        """Derive stream status from failure count and connect times.
+
+        Returns UNKNOWN if failures exceed the threshold, ONLINE if a
+        connect time is present, or OFFLINE otherwise.
+        """
         if self.failure_counter > UNKNOWN_STATUS_THRESHOLD:
             return StreamStatus.UNKNOWN
-        elif self.last_connect_time is not None:
+        if self.last_connect_time is not None:
             return StreamStatus.ONLINE
-        else:
-            return StreamStatus.OFFLINE
+        return StreamStatus.OFFLINE
 
     @classmethod
-    def from_api_response(cls, response: dict, domain: str) -> "StreamState":
-        """
-        Creates a StreamState from an API response.
+    def from_api_response(cls, response: dict[str, Any], domain: str) -> StreamState:
+        """Create a StreamState from an API response.
 
-        :param response: API response as a dictionary (camelCase keys)
-        :param domain: The stream domain
-        :return: StreamState instance
+        :param response: API response as a dictionary (camelCase keys).
+        :param domain: The stream domain.
+        :return: StreamState instance.
         """
         return cls(
             domain=domain,
@@ -63,12 +75,11 @@ class StreamState:
         )
 
     @classmethod
-    def from_db_row(cls, row: dict) -> "StreamState":
-        """
-        Creates a StreamState from a database row.
+    def from_db_row(cls, row: dict[str, Any]) -> StreamState:
+        """Create a StreamState from a database row.
 
-        :param row: Database row as a dictionary
-        :return: StreamState instance
+        :param row: Database row as a dictionary.
+        :return: StreamState instance.
         """
         return cls(
             domain=row["domain"],
@@ -85,20 +96,14 @@ class StreamConfig:
     """Represents the configuration of an Owncast stream."""
 
     name: str = ""
-    tags: List[str] = None
-
-    def __post_init__(self):
-        """Initialize default values after dataclass initialization."""
-        if self.tags is None:
-            self.tags = []
+    tags: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_api_response(cls, response: dict) -> "StreamConfig":
-        """
-        Creates a StreamConfig from an API response.
+    def from_api_response(cls, response: dict[str, Any]) -> StreamConfig:
+        """Create a StreamConfig from an API response.
 
-        :param response: API response as a dictionary
-        :return: StreamConfig instance
+        :param response: API response as a dictionary.
+        :return: StreamConfig instance.
         """
         # Truncate instance name to max length
         name = truncate(response.get("name", ""), MAX_INSTANCE_TITLE_LENGTH)

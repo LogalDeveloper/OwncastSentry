@@ -1,0 +1,46 @@
+name: CD
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+
+jobs:
+  build:
+    name: Build
+    runs-on: logaldeveloper-archlinux
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Cache uv packages
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ hashFiles('uv.lock') }}
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Compute version
+        id: version
+        run: |
+          version=$(uv run hatch version)
+          echo "version=$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Write version into maubot.yaml
+        run: |
+          sed -i "s/^version: .*/version: ${{ steps.version.outputs.version }}/" maubot.yaml
+          grep "^version:" maubot.yaml
+
+      - name: Build plugin
+        run: uv run mbc build -o owncastsentry-v${{ steps.version.outputs.version }}.mbp
+
+      - name: Upload plugin artifact
+        uses: https://github.com/christopherhx/gitea-upload-artifact@62ac910c5d3dfa85c7cb2df15afe2e342b2407c2 # v4
+        with:
+          name: owncastsentry-v${{ steps.version.outputs.version }}
+          path: owncastsentry-v${{ steps.version.outputs.version }}.mbp

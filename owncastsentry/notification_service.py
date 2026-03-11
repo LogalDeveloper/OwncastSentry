@@ -1,54 +1,71 @@
 # Copyright 2026 Logan Fick
 #
-# Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at: https://www.apache.org/licenses/LICENSE-2.0
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-import time
+"""Notification service for sending Matrix messages."""
+
 import asyncio
-from typing import List
+import time
+from typing import TYPE_CHECKING, Any
 
-from mautrix.types import TextMessageEventContent, MessageType
+from mautrix.types import MessageType, TextMessageEventContent
 
-from .database import SubscriptionRepository
 from .utils import SECONDS_BETWEEN_NOTIFICATIONS, sanitize_for_plain_text
+
+if TYPE_CHECKING:
+    import logging
+
+    from .database import SubscriptionRepository
 
 
 class NotificationService:
     """Service for sending Matrix notifications about stream events."""
 
-    def __init__(self, client, subscription_repo: SubscriptionRepository, logger):
-        """
-        Initialize the notification service.
+    def __init__(
+        self,
+        client: Any,
+        subscription_repo: SubscriptionRepository,
+        logger: logging.Logger,
+    ) -> None:
+        """Initialize the notification service.
 
-        :param client: The Matrix client for sending messages
-        :param subscription_repo: Repository for managing subscriptions
-        :param logger: Logger instance
+        :param client: The Matrix client for sending messages.
+        :param subscription_repo: Repository for managing subscriptions.
+        :param logger: Logger instance for debugging.
         """
         self.client = client
         self.subscription_repo = subscription_repo
         self.log = logger
 
         # Cache for tracking when notifications were last sent
-        self.notification_timers_cache = {}
+        self.notification_timers_cache: dict[str, float] = {}
 
     async def notify_stream_live(
         self,
         domain: str,
         name: str,
         title: str,
-        tags: List[str],
+        tags: list[str],
+        *,
         title_change: bool = False,
     ) -> None:
-        """
-        Sends notifications to rooms with subscriptions to the provided stream domain.
+        """Send notifications to rooms subscribed to a stream.
 
-        :param domain: The domain of the stream to send notifications for.
-        :param name: The name of the stream to include in the message.
-        :param title: The title of the stream to include in the message.
+        :param domain: The stream domain to send notifications for.
+        :param name: The stream name to include in the message.
+        :param title: The stream title to include in the message.
         :param tags: List of stream tags to include in the message.
-        :param title_change: Whether or not this is for a stream changing its title rather than going live.
-        :return: Nothing.
+        :param title_change: Whether this is a title change notification.
         """
         # Has enough time passed since the last notification was sent?
         if not self._can_notify(domain):
@@ -56,7 +73,10 @@ class NotificationService:
                 time.time() - self.notification_timers_cache[domain]
             )
             self.log.info(
-                f"[{domain}] Not sending notifications. Only {seconds_since_last} of required {SECONDS_BETWEEN_NOTIFICATIONS} seconds has passed since last notification."
+                f"[{domain}] Not sending notifications. Only "
+                f"{seconds_since_last} of required "
+                f"{SECONDS_BETWEEN_NOTIFICATIONS} seconds have "
+                f"passed since last notification."
             )
             return
 
@@ -74,10 +94,9 @@ class NotificationService:
         failed_notifications = 0
 
         # Send notifications to all subscribed rooms in parallel
-        # IMPROVEMENT: Parallel notification delivery with asyncio.gather (was a TODO in original code)
-        tasks = []
-        for room_id in room_ids:
-            tasks.append(self._send_notification(room_id, body_text, domain))
+        tasks = [
+            self._send_notification(room_id, body_text, domain) for room_id in room_ids
+        ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -91,42 +110,42 @@ class NotificationService:
         # Log completion
         notification_type = "title change" if title_change else "going live"
         self.log.info(
-            f"[{domain}] Completed sending {notification_type} notifications! {successful_notifications} succeeded, {failed_notifications} failed."
+            f"[{domain}] Completed sending {notification_type} "
+            f"notifications! {successful_notifications} succeeded, "
+            f"{failed_notifications} failed."
         )
 
     async def _send_notification(
         self, room_id: str, body_text: str, domain: str
     ) -> None:
-        """
-        Send a notification to a single room.
+        """Send a notification to a single room.
 
-        :param room_id: The Matrix room ID to send to
-        :param body_text: The message body text
-        :param domain: The stream domain (for logging)
-        :return: Nothing
-        :raises: Exception if sending fails
+        :param room_id: The Matrix room ID to send to.
+        :param body_text: The message body text.
+        :param domain: The stream domain (for logging).
+        :raises Exception: If sending fails.
         """
         try:
             content = TextMessageEventContent(msgtype=MessageType.TEXT, body=body_text)
             await self.client.send_message(room_id, content)
         except Exception as exception:
             self.log.warning(
-                f"[{domain}] Failed to send notification message to room [{room_id}]: {exception}"
+                f"[{domain}] Failed to send notification "
+                f"message to room [{room_id}]: {exception}"
             )
             raise
 
     def _format_message(
-        self, name: str, title: str, domain: str, tags: List[str], title_change: bool
+        self, name: str, title: str, domain: str, tags: list[str], title_change: bool
     ) -> str:
-        """
-        Format the notification message body.
+        """Format the notification message body.
 
-        :param name: The stream name
-        :param title: The stream title
-        :param domain: The stream domain
-        :param tags: List of stream tags
-        :param title_change: Whether this is a title change notification
-        :return: Formatted message body
+        :param name: The stream name.
+        :param title: The stream title.
+        :param domain: The stream domain.
+        :param tags: List of stream tags.
+        :param title_change: Whether this is a title change notification.
+        :return: Formatted message body.
         """
         # Use name if available, fallback to domain
         stream_name = name if name else domain
@@ -151,7 +170,7 @@ class NotificationService:
             safe_tags = []
             for tag in tags:
                 safe_tag = sanitize_for_plain_text(tag)
-                if safe_tag and not safe_tag.startswith('.'):
+                if safe_tag and not safe_tag.startswith("."):
                     safe_tags.append(safe_tag)
 
             if safe_tags:
@@ -161,49 +180,45 @@ class NotificationService:
         return body_text
 
     def _can_notify(self, domain: str) -> bool:
-        """
-        Check if enough time has passed to send another notification.
+        """Check if enough time has passed to send another notification.
 
-        :param domain: The stream domain
-        :return: True if notification can be sent, False otherwise
+        :param domain: The stream domain.
+        :return: True if notification can be sent, False otherwise.
         """
         if domain not in self.notification_timers_cache:
             return True
 
         seconds_since_last = round(time.time() - self.notification_timers_cache[domain])
-        return seconds_since_last >= SECONDS_BETWEEN_NOTIFICATIONS
+        return bool(seconds_since_last >= SECONDS_BETWEEN_NOTIFICATIONS)
 
     def _record_notification(self, domain: str) -> None:
-        """
-        Record that a notification was sent at the current time.
+        """Record that a notification was sent at the current time.
 
-        :param domain: The stream domain
-        :return: Nothing
+        :param domain: The stream domain.
         """
         self.notification_timers_cache[domain] = time.time()
 
     async def send_cleanup_warning(self, domain: str) -> None:
-        """
-        Send 83-day warning notification to all subscribed rooms.
+        """Send cleanup warning notification to all subscribed rooms.
 
-        :param domain: The stream domain
-        :return: Nothing
+        :param domain: The stream domain.
         """
         # Get all subscribed rooms
         room_ids = await self.subscription_repo.get_subscribed_rooms(domain)
 
         # Build the warning message
         body_text = (
-            f"⚠️  Warning: Subscription Cleanup Scheduled\n\n"
-            f"The Owncast instance at {domain} has been unreachable for 83 days. "
-            f"If it remains unreachable for 7 more days (90 days total), this "
-            f"subscription will be automatically removed."
+            "⚠️  Warning: Subscription Cleanup Scheduled\n\n"
+            f"The Owncast instance at {domain} has been "
+            f"unreachable for 83 days. If it remains unreachable "
+            f"for 7 more days (90 days total), this subscription "
+            f"will be automatically removed."
         )
 
         # Send to all rooms in parallel
-        tasks = []
-        for room_id in room_ids:
-            tasks.append(self._send_notification(room_id, body_text, domain))
+        tasks = [
+            self._send_notification(room_id, body_text, domain) for room_id in room_ids
+        ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -216,28 +231,27 @@ class NotificationService:
         )
 
     async def send_cleanup_deletion(self, domain: str) -> None:
-        """
-        Send 90-day deletion notification to all subscribed rooms.
+        """Send cleanup deletion notification to all subscribed rooms.
 
-        :param domain: The stream domain
-        :return: Nothing
+        :param domain: The stream domain.
         """
         # Get all subscribed rooms
         room_ids = await self.subscription_repo.get_subscribed_rooms(domain)
 
         # Build the deletion message
         body_text = (
-            f"🗑️  Subscription Automatically Removed\n\n"
-            f"The Owncast instance at {domain} has been unreachable for 90 days "
-            f"and has been automatically removed from subscriptions in this room.\n\n"
-            f"If the instance comes online again and you want to resubscribe, "
-            f"run `!subscribe {domain}`."
+            "🗑️  Subscription Automatically Removed\n\n"
+            f"The Owncast instance at {domain} has been "
+            f"unreachable for 90 days and has been automatically "
+            f"removed from subscriptions in this room.\n\n"
+            f"If the instance comes online again and you want to "
+            f"resubscribe, run `!subscribe {domain}`."
         )
 
         # Send to all rooms in parallel
-        tasks = []
-        for room_id in room_ids:
-            tasks.append(self._send_notification(room_id, body_text, domain))
+        tasks = [
+            self._send_notification(room_id, body_text, domain) for room_id in room_ids
+        ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -246,5 +260,6 @@ class NotificationService:
         failed = sum(1 for r in results if isinstance(r, Exception))
 
         self.log.info(
-            f"[{domain}] Sent cleanup deletion notice to {successful} rooms ({failed} failed)."
+            f"[{domain}] Sent cleanup deletion notice to "
+            f"{successful} rooms ({failed} failed)."
         )
