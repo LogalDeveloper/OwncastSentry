@@ -69,32 +69,31 @@ class OwncastClient:
 
         # Make a request to the endpoint
         try:
-            response = await self.session.request(
+            async with self.session.request(
                 "GET", status_url, allow_redirects=False
-            )
+            ) as response:
+                # Check the response code is success
+                if response.status != 200:
+                    self.log.warning(
+                        f"[{domain}] Response to request on "
+                        f"{OWNCAST_STATUS_PATH} was not 200, "
+                        f"got {response.status} instead."
+                    )
+                    return None
+
+                # Try to interpret the response as JSON
+                try:
+                    new_state = json.loads(await response.read())
+                except Exception as e:
+                    self.log.warning(
+                        f"[{domain}] Rejecting response to request on "
+                        f"{OWNCAST_STATUS_PATH} as could not be "
+                        f"interpreted as JSON: {e}"
+                    )
+                    return None
         except Exception as e:
             self.log.warning(
                 f"[{domain}] Error making GET request to {OWNCAST_STATUS_PATH}: {e}"
-            )
-            return None
-
-        # Check the response code is success
-        if response.status != 200:
-            self.log.warning(
-                f"[{domain}] Response to request on "
-                f"{OWNCAST_STATUS_PATH} was not 200, "
-                f"got {response.status} instead."
-            )
-            return None
-
-        # Try to interpret the response as JSON
-        try:
-            new_state = json.loads(await response.read())
-        except Exception as e:
-            self.log.warning(
-                f"[{domain}] Rejecting response to request on "
-                f"{OWNCAST_STATUS_PATH} as could not be "
-                f"interpreted as JSON: {e}"
             )
             return None
 
@@ -130,32 +129,31 @@ class OwncastClient:
 
         # Make a request to the endpoint
         try:
-            response = await self.session.request(
+            async with self.session.request(
                 "GET", config_url, allow_redirects=False
-            )
+            ) as response:
+                # Check the response code is success
+                if response.status != 200:
+                    self.log.warning(
+                        f"[{domain}] Response to request on "
+                        f"{OWNCAST_CONFIG_PATH} was not 200, "
+                        f"got {response.status} instead."
+                    )
+                    return None
+
+                # Try to interpret the response as JSON
+                try:
+                    config = json.loads(await response.read())
+                except Exception as e:
+                    self.log.warning(
+                        f"[{domain}] Rejecting response to request on "
+                        f"{OWNCAST_CONFIG_PATH} as could not be "
+                        f"interpreted as JSON: {e}"
+                    )
+                    return None
         except Exception as e:
             self.log.warning(
                 f"[{domain}] Error making GET request to {OWNCAST_CONFIG_PATH}: {e}"
-            )
-            return None
-
-        # Check the response code is success
-        if response.status != 200:
-            self.log.warning(
-                f"[{domain}] Response to request on "
-                f"{OWNCAST_CONFIG_PATH} was not 200, "
-                f"got {response.status} instead."
-            )
-            return None
-
-        # Try to interpret the response as JSON
-        try:
-            config = json.loads(await response.read())
-        except Exception as e:
-            self.log.warning(
-                f"[{domain}] Rejecting response to request on "
-                f"{OWNCAST_CONFIG_PATH} as could not be "
-                f"interpreted as JSON: {e}"
             )
             return None
 
