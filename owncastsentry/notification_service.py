@@ -166,7 +166,7 @@ class NotificationService:
         body_text += "\n\nTo tune in, visit: https://" + domain + "/"
 
         # Add tags if present
-        if tags and len(tags) > 0:
+        if tags:
             safe_tags = []
             for tag in tags:
                 safe_tag = sanitize_for_plain_text(tag)
