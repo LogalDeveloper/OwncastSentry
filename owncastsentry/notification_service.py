@@ -20,7 +20,12 @@ from typing import TYPE_CHECKING, Any
 
 from mautrix.types import MessageType, TextMessageEventContent
 
-from .utils import SECONDS_BETWEEN_NOTIFICATIONS, sanitize_for_plain_text
+from .utils import (
+    CLEANUP_DELETE_THRESHOLD,
+    CLEANUP_WARNING_THRESHOLD,
+    SECONDS_BETWEEN_NOTIFICATIONS,
+    sanitize_for_plain_text,
+)
 
 if TYPE_CHECKING:
     import logging
@@ -215,11 +220,15 @@ class NotificationService:
         room_ids = await self.subscription_repo.get_subscribed_rooms(domain)
 
         # Build the warning message
+        warning_days = CLEANUP_WARNING_THRESHOLD // (24 * 60)
+        delete_days = CLEANUP_DELETE_THRESHOLD // (24 * 60)
+        remaining_days = delete_days - warning_days
         body_text = (
             "⚠️  Warning: Subscription Cleanup Scheduled\n\n"
             f"The Owncast instance at {domain} has been "
-            f"unreachable for 83 days. If it remains unreachable "
-            f"for 7 more days (90 days total), this subscription "
+            f"unreachable for {warning_days} days. If it remains "
+            f"unreachable for {remaining_days} more days "
+            f"({delete_days} days total), this subscription "
             f"will be automatically removed."
         )
 
@@ -247,11 +256,13 @@ class NotificationService:
         room_ids = await self.subscription_repo.get_subscribed_rooms(domain)
 
         # Build the deletion message
+        delete_days = CLEANUP_DELETE_THRESHOLD // (24 * 60)
         body_text = (
             "🗑️  Subscription Automatically Removed\n\n"
             f"The Owncast instance at {domain} has been "
-            f"unreachable for 90 days and has been automatically "
-            f"removed from subscriptions in this room.\n\n"
+            f"unreachable for {delete_days} days and has been "
+            f"automatically removed from subscriptions in this "
+            f"room.\n\n"
             f"If the instance comes online again and you want to "
             f"resubscribe, run `!subscribe {domain}`."
         )
