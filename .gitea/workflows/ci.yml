@@ -82,7 +82,7 @@ jobs:
         run: uv sync --frozen
 
       - name: Check types with Mypy
-        run: uv run mypy owncastsentry/
+        run: uv run mypy .
 
   spelling:
     name: Spelling

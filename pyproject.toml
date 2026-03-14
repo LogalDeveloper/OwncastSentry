@@ -42,7 +42,7 @@ python_version = "3.14"
 strict = true
 warn_unreachable = true
 explicit_package_bases = true
-exclude = ["owncastsentry/_version\\.py"]
+exclude = ["owncastsentry/_version\\.py", "tests/"]
 
 [tool.ruff]
 target-version = "py314"
@@ -103,7 +103,7 @@ ignore = [
 asyncio_mode = "auto"
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S311"]
+"tests/**" = ["S101"]
 
 [tool.coverage.run]
 source = ["owncastsentry"]
