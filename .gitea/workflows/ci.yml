@@ -43,6 +43,28 @@ jobs:
       - name: Check linting with Ruff
         run: uv run ruff check .
 
+  tests:
+    name: Tests
+    runs-on: logaldeveloper-archlinux
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Cache uv packages
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ hashFiles('uv.lock') }}
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run unit tests with Pytest
+        run: uv run pytest -v --cov --cov-report=
+
+      - name: Report code coverage
+        run: uv run coverage report
+
   type-checking:
     name: Type Checking
     runs-on: logaldeveloper-archlinux

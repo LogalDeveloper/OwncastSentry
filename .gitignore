@@ -3,3 +3,4 @@ __pycache__/
 *$py.class
 .venv/
 owncastsentry/_version.py
+.coverage
