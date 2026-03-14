@@ -80,39 +80,23 @@ class CommandHandler:
         # Try to add a new subscription for this stream in this room
         try:
             await self.subscription_repo.add(stream_domain, evt.room_id)
-        except sqlite3.IntegrityError as exception:
-            # Was it a duplicate row?
-            if "UNIQUE constraint failed" in exception.args[0]:
-                # Expected: room is already subscribed.
-                await evt.reply(
-                    "This room is already subscribed to notifications for "
-                    + stream_domain
-                    + "."
-                )
-                return
-            # Something unexpected happened. Give up.
-            self.log.error(
-                f"[{stream_domain}] An error occurred while "
-                f"attempting to add subscription in room "
-                f"{evt.room_id}: {exception}"
+        except sqlite3.IntegrityError:
+            # Room is already subscribed.
+            await evt.reply(
+                "This room is already subscribed to notifications for "
+                + stream_domain
+                + "."
             )
-            raise exception
+            return
 
         # Try to add a placeholder row for the stream's state.
         try:
             await self.stream_repo.create(stream_domain)
             # First time seeing this stream. Log it.
             self.log.info(f"[{stream_domain}] Discovered new stream!")
-        except sqlite3.IntegrityError as exception:
+        except sqlite3.IntegrityError:
             # Adding rows for known streams is expected.
-            if "UNIQUE constraint failed" not in exception.args[0]:
-                # Something unexpected happened. Give up.
-                self.log.error(
-                    f"[{stream_domain}] An error occurred while "
-                    f"attempting to add stream information "
-                    f"after adding subscription: {exception}"
-                )
-                raise exception
+            pass
 
         # All went well! Tell the user.
         self.log.info(f"[{stream_domain}] Subscription added for room {evt.room_id}.")
@@ -205,13 +189,6 @@ class CommandHandler:
             # Get the stream state from the database
             stream_state = await self.stream_repo.get_by_domain(domain)
 
-            if stream_state is None:
-                # Stream in subscriptions but not streams table
-                body_text += f"- **{domain}**  \n"
-                body_text += "  - Status: Unknown  \n"
-                body_text += f"  - Link: https://{domain}\n\n"
-                continue
-
             # Determine stream name (use domain as fallback)
             stream_name = stream_state.name if stream_state.name else domain
             safe_stream_name = sanitize_for_markdown(stream_name)
@@ -227,11 +204,8 @@ class CommandHandler:
             # Determine status and duration (as a sub-bullet)
             if stream_state.status == StreamStatus.ONLINE:
                 # Stream is online - use last_connect_time
-                if stream_state.last_connect_time:
-                    duration = self._format_duration(stream_state.last_connect_time)
-                    body_text += f"  - Status: Online for {duration}  \n"
-                else:
-                    body_text += "  - Status: Online  \n"
+                duration = self._format_duration(stream_state.last_connect_time)
+                body_text += f"  - Status: Online for {duration}  \n"
             elif stream_state.status == StreamStatus.UNKNOWN:
                 # Stream status is unknown - instance unreachable
                 body_text += "  - Status: Unknown (instance unreachable)  \n"

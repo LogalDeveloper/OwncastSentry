@@ -27,7 +27,7 @@ from aioresponses import aioresponses
 
 from owncastsentry.commands import CommandHandler
 from owncastsentry.models import StreamState
-from owncastsentry.utils import OWNCAST_STATUS_PATH
+from owncastsentry.utils import OWNCAST_STATUS_PATH, UNKNOWN_STATUS_THRESHOLD
 from tests.conftest import VALID_STATUS_RESPONSE
 
 
@@ -266,6 +266,59 @@ class TestSubscriptionsCommand:
             "**Subscriptions for this room (1):**\n\n"
             "● **Test Stream** \n"
             "  ○ Status: Offline for 71 days\n"
+            "  ○ Link: https://stream.logal.dev\n"
+            "To unsubscribe from any of these Owncast "
+            "instances, use `!unsubscribe <domain>`"
+        )
+
+    async def test_shows_offline_stream_without_disconnect_time(
+        self, maubot_test_bot, maubot_plugin
+    ) -> None:
+        """Show offline status without duration before first poll completes."""
+        status_url = f"https://stream.logal.dev{OWNCAST_STATUS_PATH}"
+        with aioresponses() as mocked:
+            mocked.get(
+                status_url,
+                body=json.dumps(VALID_STATUS_RESPONSE).encode(),
+            )
+            await maubot_test_bot.send("!subscribe stream.logal.dev")
+
+        # Stream row exists with no state yet - query subscriptions immediately
+        await maubot_test_bot.send("!subscriptions")
+
+        assert len(maubot_test_bot.responded) == 2
+        assert maubot_test_bot.responded[1].content.body == (
+            "**Subscriptions for this room (1):**\n\n"
+            "● **stream.logal.dev** \n"
+            "  ○ Status: Offline\n"
+            "  ○ Link: https://stream.logal.dev\n"
+            "To unsubscribe from any of these Owncast "
+            "instances, use `!unsubscribe <domain>`"
+        )
+
+    async def test_shows_unknown_stream(self, maubot_test_bot, maubot_plugin) -> None:
+        """Show unknown status when instance has been unreachable."""
+        status_url = f"https://stream.logal.dev{OWNCAST_STATUS_PATH}"
+        with aioresponses() as mocked:
+            mocked.get(
+                status_url,
+                body=json.dumps(VALID_STATUS_RESPONSE).encode(),
+            )
+            await maubot_test_bot.send("!subscribe stream.logal.dev")
+
+        # Increment failure counter past the unknown threshold
+        for _ in range(UNKNOWN_STATUS_THRESHOLD + 1):
+            await maubot_plugin.stream_repo.increment_failure_counter(
+                "stream.logal.dev"
+            )
+
+        await maubot_test_bot.send("!subscriptions")
+
+        assert len(maubot_test_bot.responded) == 2
+        assert maubot_test_bot.responded[1].content.body == (
+            "**Subscriptions for this room (1):**\n\n"
+            "● **stream.logal.dev** \n"
+            "  ○ Status: Unknown (instance unreachable)\n"
             "  ○ Link: https://stream.logal.dev\n"
             "To unsubscribe from any of these Owncast "
             "instances, use `!unsubscribe <domain>`"

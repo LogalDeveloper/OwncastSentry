@@ -127,11 +127,6 @@ class StreamMonitor:
             # Backoff is expected behavior, not a failure
             return True
 
-        # Defensive check: old_state should always exist here since
-        # the stream is in the DB
-        if old_state is None:
-            return False
-
         # Flag: first state update of a brand-new stream to avoid
         # sending notifications if it's already live.
         first_update = False
@@ -281,10 +276,7 @@ class StreamMonitor:
             # Yep. This stream is now offline. Log it.
             update_database = True
             self.offline_timer_cache[domain] = time.time()
-            if first_update:
-                self.log.info(f"[{domain}] Stream is offline.")
-            else:
-                self.log.info(f"[{domain}] Stream is now offline.")
+            self.log.info(f"[{domain}] Stream is now offline.")
 
         # Update the database with current stream state, if needed.
         if update_database:
