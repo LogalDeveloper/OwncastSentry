@@ -114,6 +114,9 @@ class StreamMonitor:
         old_state = await self.stream_repo.get_by_domain(domain)
         failure_counter = old_state.failure_counter if old_state else 0
 
+        if old_state is None:
+            return True
+
         # Check if we should query this stream based on backoff schedule
         if not should_query_stream(failure_counter):
             # Skip this cycle, increment counter to track time passage

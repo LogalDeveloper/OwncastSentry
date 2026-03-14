@@ -188,6 +188,8 @@ class CommandHandler:
         for domain in subscribed_domains:
             # Get the stream state from the database
             stream_state = await self.stream_repo.get_by_domain(domain)
+            if stream_state is None:
+                continue
 
             # Determine stream name (use domain as fallback)
             stream_name = stream_state.name if stream_state.name else domain
@@ -204,8 +206,9 @@ class CommandHandler:
             # Determine status and duration (as a sub-bullet)
             if stream_state.status == StreamStatus.ONLINE:
                 # Stream is online - use last_connect_time
-                duration = self._format_duration(stream_state.last_connect_time)
-                body_text += f"  - Status: Online for {duration}  \n"
+                if stream_state.last_connect_time:
+                    duration = self._format_duration(stream_state.last_connect_time)
+                    body_text += f"  - Status: Online for {duration}  \n"
             elif stream_state.status == StreamStatus.UNKNOWN:
                 # Stream status is unknown - instance unreachable
                 body_text += "  - Status: Unknown (instance unreachable)  \n"
