@@ -29,7 +29,7 @@ jobs:
         run: |
           version=$(uv run hatch version)
           echo "version=$version"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITEA_OUTPUT"
 
       - name: Write version into maubot.yaml
         run: |
@@ -37,7 +37,13 @@ jobs:
           grep "^version:" maubot.yaml
 
       - name: Build plugin
-        run: uv run mbc build -o owncastsentry-v${{ steps.version.outputs.version }}.mbp
+        run: 7z a -tzip -mx=9 -xr!__pycache__ owncastsentry-v${{ steps.version.outputs.version }}.mbp owncastsentry/ maubot.yaml base-config.yaml LICENSE.txt
+
+      - name: Print artifact checksums
+        run: |
+          echo "MD5: $(md5sum owncastsentry-v${{ steps.version.outputs.version }}.mbp)"
+          echo "SHA1: $(sha1sum owncastsentry-v${{ steps.version.outputs.version }}.mbp)"
+          echo "SHA256: $(sha256sum owncastsentry-v${{ steps.version.outputs.version }}.mbp)"
 
       - name: Upload plugin artifact
         uses: https://github.com/christopherhx/gitea-upload-artifact@62ac910c5d3dfa85c7cb2df15afe2e342b2407c2 # v4
