@@ -18,8 +18,7 @@ import asyncio
 import time
 from typing import TYPE_CHECKING
 
-from .health_checker import UpdateResult
-from .models import StreamState
+from .models import StreamState, UpdateResult
 from .utils import (
     CLEANUP_DELETE_THRESHOLD,
     CLEANUP_WARNING_THRESHOLD,
@@ -77,17 +76,14 @@ class StreamMonitor:
         total_streams = len(subscribed_domains)
 
         # Build a list of async tasks for each stream domain
-        tasks = [
-            asyncio.create_task(self.update_stream(domain))
-            for domain in subscribed_domains
-        ]
-
-        # Run the tasks in parallel and collect results
-        results = await asyncio.gather(*tasks)
+        # Run all stream updates in parallel and collect results
+        results = await asyncio.gather(
+            *(self.update_stream(domain) for domain in subscribed_domains)
+        )
 
         # Count successes and failures
-        successful_checks = sum(1 for result in results if result is True)
-        failed_checks = sum(1 for result in results if result is False)
+        successful_checks = results.count(True)
+        failed_checks = results.count(False)
 
         self.log.debug(
             f"Update complete. {successful_checks}/{total_streams} succeeded, "
@@ -159,8 +155,7 @@ class StreamMonitor:
         await self.stream_repo.reset_failure_counter(domain)
 
         # Initialize timer cache entries to prevent KeyError on first access
-        if domain not in self.offline_timer_cache:
-            self.offline_timer_cache[domain] = 0
+        self.offline_timer_cache.setdefault(domain, 0)
 
         # Does the last known stream state lack connect/disconnect?
         if (
@@ -184,7 +179,7 @@ class StreamMonitor:
 
             # Calculate seconds since the stream last went offline
             seconds_since_last_offline = round(
-                time.time() - self.offline_timer_cache[domain]
+                time.monotonic() - self.offline_timer_cache[domain]
             )
 
             # Have we queried this stream before?
@@ -278,7 +273,7 @@ class StreamMonitor:
         ):
             # Yep. This stream is now offline. Log it.
             update_database = True
-            self.offline_timer_cache[domain] = time.time()
+            self.offline_timer_cache[domain] = time.monotonic()
             self.log.info(f"[{domain}] Stream is now offline.")
 
         # Update the database with current stream state, if needed.

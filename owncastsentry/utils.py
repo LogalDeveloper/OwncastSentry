@@ -23,6 +23,16 @@ OWNCAST_STATUS_PATH = "/api/status"
 # Path to GetWebConfig API call on Owncast instances
 OWNCAST_CONFIG_PATH = "/api/config"
 
+# Fields that must be present in an Owncast status API response
+REQUIRED_STATUS_FIELDS = frozenset(
+    {
+        "lastConnectTime",
+        "lastDisconnectTime",
+        "streamTitle",
+        "online",
+    }
+)
+
 
 def user_agent(version: str) -> str:
     """Build the User-Agent header string for HTTP requests.
@@ -50,9 +60,13 @@ SECONDS_BETWEEN_NOTIFICATIONS = 20 * 60  # 20 minutes in seconds
 #   online after, it's treated as regular going live.
 TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN = 7 * 60  # 7 min in seconds
 
-# Counter thresholds for auto-cleanup (60-second polling intervals)
-CLEANUP_WARNING_THRESHOLD = 83 * 24 * 60  # 119,520 cycles = 83 days
-CLEANUP_DELETE_THRESHOLD = 90 * 24 * 60  # 129,600 cycles = 90 days
+# Auto-cleanup timing (days of continuous unreachability)
+CLEANUP_WARNING_DAYS = 83
+CLEANUP_DELETE_DAYS = 90
+
+# Counter thresholds derived from days (60-second polling intervals)
+CLEANUP_WARNING_THRESHOLD = CLEANUP_WARNING_DAYS * 24 * 60
+CLEANUP_DELETE_THRESHOLD = CLEANUP_DELETE_DAYS * 24 * 60
 
 # Failure counter threshold for treating stream status as "unknown"
 UNKNOWN_STATUS_THRESHOLD = 15
@@ -109,7 +123,7 @@ def domainify(url: str) -> str:
 
     # Prepend // if no scheme so urlparse treats input as netloc
     if not url.startswith(("http://", "https://", "//")):
-        url = "//" + url
+        url = f"//{url}"
 
     parsed = urlparse(url)
     domain = (parsed.netloc or parsed.path).lower()
@@ -133,6 +147,9 @@ def truncate(text: str, max_length: int) -> str:
     return text[:max_length]
 
 
+_MARKDOWN_ESCAPE_TABLE = str.maketrans({c: f"\\{c}" for c in r"\*_[]()~`#+-=|{}.!<>&"})
+
+
 def escape_markdown(text: str) -> str:
     """Escape Markdown special characters to prevent injection attacks.
 
@@ -146,38 +163,7 @@ def escape_markdown(text: str) -> str:
     if not text:
         return text
 
-    # Escape Markdown special characters by prefixing with backslash
-    # Covers: formatting (*_~`), links ([]()), headings (#), lists (-+),
-    # blockquotes (>), code blocks (```), and other special characters
-    special_chars = {
-        "\\": "\\\\",  # Backslash must be first to avoid double-escaping
-        "*": "\\*",
-        "_": "\\_",
-        "[": "\\[",
-        "]": "\\]",
-        "(": "\\(",
-        ")": "\\)",
-        "~": "\\~",
-        "`": "\\`",
-        "#": "\\#",
-        "+": "\\+",
-        "-": "\\-",
-        "=": "\\=",
-        "|": "\\|",
-        "{": "\\{",
-        "}": "\\}",
-        ".": "\\.",
-        "!": "\\!",
-        "<": "\\<",
-        ">": "\\>",
-        "&": "\\&",
-    }
-
-    escaped_text = text
-    for char, replacement in special_chars.items():
-        escaped_text = escaped_text.replace(char, replacement)
-
-    return escaped_text
+    return text.translate(_MARKDOWN_ESCAPE_TABLE)
 
 
 def sanitize_for_plain_text(text: str) -> str:
@@ -216,11 +202,4 @@ def sanitize_for_markdown(text: str) -> str:
     if not text:
         return text
 
-    # Remove newlines and carriage returns to prevent multi-line injection
-    sanitized = text.replace("\n", " ").replace("\r", " ")
-
-    # Collapse multiple spaces into single space
-    sanitized = " ".join(sanitized.split())
-
-    # Escape Markdown special characters
-    return escape_markdown(sanitized)
+    return escape_markdown(sanitize_for_plain_text(text))

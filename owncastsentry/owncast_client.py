@@ -14,16 +14,20 @@
 
 """HTTP client for querying Owncast instance APIs."""
 
-import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 
+from .models import StreamConfig, StreamState
+from .utils import (
+    OWNCAST_CONFIG_PATH,
+    OWNCAST_STATUS_PATH,
+    REQUIRED_STATUS_FIELDS,
+    user_agent,
+)
+
 if TYPE_CHECKING:
     import logging
-
-from .models import StreamConfig, StreamState
-from .utils import OWNCAST_CONFIG_PATH, OWNCAST_STATUS_PATH, user_agent
 
 
 class OwncastClient:
@@ -55,6 +59,37 @@ class OwncastClient:
             connector=connector,
         )
 
+    async def _fetch_json(self, domain: str, path: str) -> dict[str, Any] | None:
+        """Fetch and parse JSON from an Owncast API endpoint.
+
+        :param domain: The domain to query.
+        :param path: The API path to request.
+        :return: Parsed JSON response, or None on error.
+        """
+        url = f"https://{domain}{path}"
+        try:
+            async with self.session.get(url, allow_redirects=False) as response:
+                if response.status != 200:
+                    self.log.warning(
+                        f"[{domain}] Response to request on "
+                        f"{path} was not 200, "
+                        f"got {response.status} instead."
+                    )
+                    return None
+                try:
+                    result: dict[str, Any] = await response.json()
+                    return result
+                except (ValueError, aiohttp.ContentTypeError) as e:
+                    self.log.warning(
+                        f"[{domain}] Rejecting response to request on "
+                        f"{path} as could not be "
+                        f"interpreted as JSON: {e}"
+                    )
+                    return None
+        except (aiohttp.ClientError, TimeoutError, OSError) as e:
+            self.log.warning(f"[{domain}] Error making GET request to {path}: {e}")
+            return None
+
     async def get_stream_state(self, domain: str) -> StreamState | None:
         """Get the current stream state for a given domain.
 
@@ -65,53 +100,19 @@ class OwncastClient:
         :return: A StreamState if available, None on error.
         """
         self.log.debug(f"[{domain}] Fetching current stream state...")
-        status_url = "https://" + domain + OWNCAST_STATUS_PATH
-
-        # Make a request to the endpoint
-        try:
-            async with self.session.request(
-                "GET", status_url, allow_redirects=False
-            ) as response:
-                # Check the response code is success
-                if response.status != 200:
-                    self.log.warning(
-                        f"[{domain}] Response to request on "
-                        f"{OWNCAST_STATUS_PATH} was not 200, "
-                        f"got {response.status} instead."
-                    )
-                    return None
-
-                # Try to interpret the response as JSON
-                try:
-                    new_state = json.loads(await response.read())
-                except Exception as e:
-                    self.log.warning(
-                        f"[{domain}] Rejecting response to request on "
-                        f"{OWNCAST_STATUS_PATH} as could not be "
-                        f"interpreted as JSON: {e}"
-                    )
-                    return None
-        except Exception as e:
-            self.log.warning(
-                f"[{domain}] Error making GET request to {OWNCAST_STATUS_PATH}: {e}"
-            )
+        new_state = await self._fetch_json(domain, OWNCAST_STATUS_PATH)
+        if new_state is None:
             return None
 
         # Validate the response contains all basic info needed
-        required_fields = [
-            "lastConnectTime",
-            "lastDisconnectTime",
-            "streamTitle",
-            "online",
-        ]
-        for field in required_fields:
-            if field not in new_state:
-                self.log.warning(
-                    f"[{domain}] Rejecting response to request "
-                    f"on {OWNCAST_STATUS_PATH} as it does not "
-                    f"have {field} field."
-                )
-                return None
+        missing = REQUIRED_STATUS_FIELDS - new_state.keys()
+        if missing:
+            self.log.warning(
+                f"[{domain}] Rejecting response to request on "
+                f"{OWNCAST_STATUS_PATH} as it is missing "
+                f"fields: {', '.join(sorted(missing))}"
+            )
+            return None
 
         return StreamState.from_api_response(new_state, domain)
 
@@ -125,39 +126,10 @@ class OwncastClient:
         :return: A StreamConfig, or None if fetch failed.
         """
         self.log.debug(f"[{domain}] Fetching current stream config...")
-        config_url = "https://" + domain + OWNCAST_CONFIG_PATH
-
-        # Make a request to the endpoint
-        try:
-            async with self.session.request(
-                "GET", config_url, allow_redirects=False
-            ) as response:
-                # Check the response code is success
-                if response.status != 200:
-                    self.log.warning(
-                        f"[{domain}] Response to request on "
-                        f"{OWNCAST_CONFIG_PATH} was not 200, "
-                        f"got {response.status} instead."
-                    )
-                    return None
-
-                # Try to interpret the response as JSON
-                try:
-                    config = json.loads(await response.read())
-                except Exception as e:
-                    self.log.warning(
-                        f"[{domain}] Rejecting response to request on "
-                        f"{OWNCAST_CONFIG_PATH} as could not be "
-                        f"interpreted as JSON: {e}"
-                    )
-                    return None
-        except Exception as e:
-            self.log.warning(
-                f"[{domain}] Error making GET request to {OWNCAST_CONFIG_PATH}: {e}"
-            )
+        config = await self._fetch_json(domain, OWNCAST_CONFIG_PATH)
+        if config is None:
             return None
 
-        # Create StreamConfig from response (fields are truncated to max lengths)
         return StreamConfig.from_api_response(config)
 
     async def validate_instance(self, domain: str) -> bool:

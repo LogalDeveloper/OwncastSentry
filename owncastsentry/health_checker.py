@@ -22,30 +22,8 @@ if TYPE_CHECKING:
 
     from mautrix.util.async_db import Database
 
+    from .models import UpdateResult
     from .owncast_client import OwncastClient
-
-
-@dataclass
-class UpdateResult:
-    """Result of a stream update cycle."""
-
-    total_streams: int
-    successful_checks: int
-    failed_checks: int
-
-    @property
-    def http_healthy(self) -> bool:
-        """Determine HTTP health based on update results.
-
-        HTTP is considered healthy if:
-        - No streams are subscribed (nothing to check), OR
-        - At least one stream check succeeded
-
-        :return: True if HTTP is considered healthy.
-        """
-        if self.total_streams == 0:
-            return True
-        return self.successful_checks > 0
 
 
 @dataclass
@@ -92,7 +70,7 @@ class HealthChecker:
             async with self.db.acquire() as conn:  # type: ignore[var-annotated]
                 await conn.fetchval("SELECT 1")
             return True
-        except Exception as e:
+        except Exception as e:  # broad catch - DB backends raise varied errors
             self.log.warning(f"Database health check failed: {e}")
             return False
 
@@ -126,7 +104,7 @@ class HealthChecker:
         )
 
         # Skip endpoint notification if not configured
-        if not endpoint or not endpoint.strip():
+        if not endpoint.strip():
             self.log.debug("Health check endpoint not configured, skipping report.")
             return
 

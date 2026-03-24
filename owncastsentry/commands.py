@@ -83,9 +83,7 @@ class CommandHandler:
         except sqlite3.IntegrityError:
             # Room is already subscribed.
             await evt.reply(
-                "This room is already subscribed to notifications for "
-                + stream_domain
-                + "."
+                f"This room is already subscribed to notifications for {stream_domain}."
             )
             return
 
@@ -101,9 +99,8 @@ class CommandHandler:
         # All went well! Tell the user.
         self.log.info(f"[{stream_domain}] Subscription added for room {evt.room_id}.")
         await evt.reply(
-            "Subscription added! This room will receive notifications when "
-            + stream_domain
-            + " goes live."
+            f"Subscription added! This room will receive "
+            f"notifications when {stream_domain} goes live."
         )
 
     async def unsubscribe(self, evt: MessageEvent, url: str) -> None:
@@ -125,15 +122,14 @@ class CommandHandler:
                 f"[{stream_domain}] Subscription removed for room {evt.room_id}."
             )
             await evt.reply(
-                "Subscription removed! This room will no "
-                "longer receive notifications for " + stream_domain + "."
+                f"Subscription removed! This room will no "
+                f"longer receive notifications for {stream_domain}."
             )
         else:
             # No, nothing changed. Tell the user.
             await evt.reply(
-                "This room is already not subscribed to notifications for "
-                + stream_domain
-                + "."
+                "This room is already not subscribed to "
+                f"notifications for {stream_domain}."
             )
 
     def _format_duration(self, timestamp_str: str) -> str:
@@ -143,7 +139,7 @@ class CommandHandler:
         :return: Formatted duration string (e.g., "1 hour", "2 days").
         """
         try:
-            timestamp = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+            timestamp = datetime.fromisoformat(timestamp_str)
             now = datetime.now(UTC)
             delta = now - timestamp
 
@@ -158,7 +154,7 @@ class CommandHandler:
                 return f"{hours} hour{'s' if hours != 1 else ''}"
             days = seconds // 86400
             return f"{days} day{'s' if days != 1 else ''}"
-        except Exception:
+        except ValueError:
             return "unknown duration"
 
     async def subscriptions(self, evt: MessageEvent) -> None:
@@ -183,7 +179,7 @@ class CommandHandler:
 
         # Build the response message body as Markdown
         count = len(subscribed_domains)
-        body_text = f"**Subscriptions for this room ({count}):**\n\n"
+        parts = [f"**Subscriptions for this room ({count}):**\n\n"]
 
         for domain in subscribed_domains:
             # Get the stream state from the database
@@ -192,45 +188,41 @@ class CommandHandler:
                 continue
 
             # Determine stream name (use domain as fallback)
-            stream_name = stream_state.name if stream_state.name else domain
+            stream_name = stream_state.name or domain
             safe_stream_name = sanitize_for_markdown(stream_name)
 
             # Start building this stream's entry with stream name as main bullet
-            body_text += f"- **{safe_stream_name}**  \n"
+            parts.append(f"- **{safe_stream_name}**  \n")
 
             # Add title if stream is online (as a sub-bullet)
             if stream_state.status == StreamStatus.ONLINE and stream_state.title:
                 safe_title = sanitize_for_markdown(stream_state.title)
-                body_text += f"  - Title: {safe_title}  \n"
+                parts.append(f"  - Title: {safe_title}  \n")
 
             # Determine status and duration (as a sub-bullet)
-            if stream_state.status == StreamStatus.ONLINE:
-                # Stream is online - use last_connect_time
-                if stream_state.last_connect_time:
+            match stream_state.status:
+                case StreamStatus.ONLINE if stream_state.last_connect_time:
                     duration = self._format_duration(stream_state.last_connect_time)
-                    body_text += f"  - Status: Online for {duration}  \n"
-            elif stream_state.status == StreamStatus.UNKNOWN:
-                # Stream status is unknown - instance unreachable
-                body_text += "  - Status: Unknown (instance unreachable)  \n"
-            else:
-                # Stream is offline - use last_disconnect_time
-                if stream_state.last_disconnect_time:
+                    parts.append(f"  - Status: Online for {duration}  \n")
+                case StreamStatus.UNKNOWN:
+                    parts.append("  - Status: Unknown (instance unreachable)  \n")
+                case StreamStatus.OFFLINE if stream_state.last_disconnect_time:
                     duration = self._format_duration(stream_state.last_disconnect_time)
-                    body_text += f"  - Status: Offline for {duration}  \n"
-                else:
-                    body_text += "  - Status: Offline  \n"
+                    parts.append(f"  - Status: Offline for {duration}  \n")
+                case StreamStatus.OFFLINE:
+                    parts.append("  - Status: Offline  \n")
 
             # Add stream link (as a sub-bullet)
-            body_text += f"  - Link: https://{domain}\n\n"
+            parts.append(f"  - Link: https://{domain}\n\n")
 
         # Add help text for unsubscribing
-        body_text += (
+        parts.append(
             "\nTo unsubscribe from any of these Owncast "
             "instances, use `!unsubscribe <domain>`"
         )
 
         # Send the response as Markdown
-        await evt.reply(body_text, markdown=True)
+        await evt.reply("".join(parts), markdown=True)
 
     async def live(self, evt: MessageEvent) -> None:
         """List currently live streams in the current room.
@@ -271,28 +263,28 @@ class CommandHandler:
 
         # Build the response message body as Markdown
         count = len(live_streams)
-        body_text = f"**Live Owncast instances ({count}):**\n\n"
+        parts = [f"**Live Owncast instances ({count}):**\n\n"]
 
         for domain, stream_state in live_streams:
             # Determine stream name (use domain as fallback)
-            stream_name = stream_state.name if stream_state.name else domain
+            stream_name = stream_state.name or domain
             safe_stream_name = sanitize_for_markdown(stream_name)
 
             # Start building this stream's entry with stream name as main bullet
-            body_text += f"- **{safe_stream_name}**  \n"
+            parts.append(f"- **{safe_stream_name}**  \n")
 
             # Add title (should be present for live streams)
             if stream_state.title:
                 safe_title = sanitize_for_markdown(stream_state.title)
-                body_text += f"  - Title: {safe_title}  \n"
+                parts.append(f"  - Title: {safe_title}  \n")
 
             # Add status with duration
             if stream_state.last_connect_time:
                 duration = self._format_duration(stream_state.last_connect_time)
-                body_text += f"  - Online for {duration}  \n"
+                parts.append(f"  - Online for {duration}  \n")
 
             # Add stream link
-            body_text += f"  - Link: https://{domain}\n\n"
+            parts.append(f"  - Link: https://{domain}\n\n")
 
         # Send the response as Markdown
-        await evt.reply(body_text.rstrip(), markdown=True)
+        await evt.reply("".join(parts).rstrip(), markdown=True)

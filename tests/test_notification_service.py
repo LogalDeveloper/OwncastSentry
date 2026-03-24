@@ -62,7 +62,7 @@ class TestCanNotify:
         service = _make_service(
             client=_StubMatrixClient(), subscription_repo=subscription_repo
         )
-        service.notification_timers_cache["example.com"] = time.time()
+        service.notification_timers_cache["example.com"] = time.monotonic()
         assert service._can_notify("example.com") is False
 
     def test_after_cooldown_allowed(
@@ -74,7 +74,7 @@ class TestCanNotify:
         )
         # Subtract an extra second to ensure the cooldown has fully elapsed
         service.notification_timers_cache["example.com"] = (
-            time.time() - SECONDS_BETWEEN_NOTIFICATIONS - 1
+            time.monotonic() - SECONDS_BETWEEN_NOTIFICATIONS - 1
         )
         assert service._can_notify("example.com") is True
 
@@ -253,7 +253,7 @@ class TestNotifyStreamLive:
         """Skip sending when the domain is within the rate-limit cooldown."""
         client = _StubMatrixClient()
         service = _make_service(client=client, subscription_repo=subscription_repo)
-        service.notification_timers_cache["example.com"] = time.time()
+        service.notification_timers_cache["example.com"] = time.monotonic()
 
         await stream_repo.create("example.com")
         await subscription_repo.add("example.com", "!room1:matrix.org")

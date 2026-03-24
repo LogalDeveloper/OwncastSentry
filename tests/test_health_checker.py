@@ -22,7 +22,8 @@ from typing import TYPE_CHECKING
 import pytest
 from aioresponses import aioresponses
 
-from owncastsentry.health_checker import HealthChecker, HealthStatus, UpdateResult
+from owncastsentry.health_checker import HealthChecker, HealthStatus
+from owncastsentry.models import UpdateResult
 from owncastsentry.owncast_client import OwncastClient
 
 if TYPE_CHECKING:

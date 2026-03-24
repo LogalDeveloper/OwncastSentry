@@ -337,7 +337,7 @@ class TestUpdateStreamBriefOffline:
         )
 
         # Recently offline (within cooldown)
-        monitor.offline_timer_cache["brief.com"] = time.time() - 60
+        monitor.offline_timer_cache["brief.com"] = time.monotonic() - 60
 
         result = await monitor.update_stream("brief.com")
         assert result is True
@@ -375,7 +375,7 @@ class TestUpdateStreamBriefOffline:
         )
 
         # Recently offline (within cooldown)
-        monitor.offline_timer_cache["brief.com"] = time.time() - 60
+        monitor.offline_timer_cache["brief.com"] = time.monotonic() - 60
 
         result = await monitor.update_stream("brief.com")
         assert result is True
@@ -424,7 +424,7 @@ class TestUpdateStreamTitleChange:
         monitor.offline_timer_cache["title.com"] = 0
         # Subtract an extra second to ensure the cooldown has fully elapsed
         notification_service.notification_timers_cache["title.com"] = (
-            time.time() - SECONDS_BETWEEN_NOTIFICATIONS - 1
+            time.monotonic() - SECONDS_BETWEEN_NOTIFICATIONS - 1
         )
 
         result = await monitor.update_stream("title.com")
@@ -473,7 +473,7 @@ class TestUpdateStreamTitleChange:
         monitor.offline_timer_cache["title.com"] = 0
         # Subtract an extra second to ensure the cooldown has fully elapsed
         notification_service.notification_timers_cache["title.com"] = (
-            time.time() - SECONDS_BETWEEN_NOTIFICATIONS - 1
+            time.monotonic() - SECONDS_BETWEEN_NOTIFICATIONS - 1
         )
 
         result = await monitor.update_stream("title.com")
@@ -518,7 +518,7 @@ class TestUpdateStreamTitleChange:
 
         # Offline timer is MORE recent than last notification,
         # and both are old enough to pass rate limiting
-        now = time.time()
+        now = time.monotonic()
         monitor.offline_timer_cache["title.com"] = (
             now - SECONDS_BETWEEN_NOTIFICATIONS - 100
         )
@@ -571,9 +571,9 @@ class TestUpdateStreamGoesOffline:
         )
         monitor.offline_timer_cache["offline.com"] = 0
 
-        before = time.time()
+        before = time.monotonic()
         result = await monitor.update_stream("offline.com")
-        after = time.time()
+        after = time.monotonic()
 
         assert result is True
         assert before <= monitor.offline_timer_cache["offline.com"] <= after

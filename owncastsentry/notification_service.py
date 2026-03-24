@@ -21,8 +21,8 @@ from typing import TYPE_CHECKING, Any
 from mautrix.types import MessageType, TextMessageEventContent
 
 from .utils import (
-    CLEANUP_DELETE_THRESHOLD,
-    CLEANUP_WARNING_THRESHOLD,
+    CLEANUP_DELETE_DAYS,
+    CLEANUP_WARNING_DAYS,
     SECONDS_BETWEEN_NOTIFICATIONS,
     sanitize_for_plain_text,
 )
@@ -88,36 +88,18 @@ class NotificationService:
         # Record that we're sending a notification now
         self._record_notification(domain)
 
-        # Get a list of room IDs with active subscriptions to the stream domain
-        room_ids = await self.subscription_repo.get_subscribed_rooms(domain)
-
         # Build the notification message
         body_text = self._format_message(name, title, domain, tags, title_change)
 
-        # Set up counters for statistics
-        successful_notifications = 0
-        failed_notifications = 0
-
         # Send notifications to all subscribed rooms in parallel
-        tasks = [
-            self._send_notification(room_id, body_text, domain) for room_id in room_ids
-        ]
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Count successes and failures
-        for result in results:
-            if isinstance(result, Exception):
-                failed_notifications += 1
-            else:
-                successful_notifications += 1
+        successful, failed = await self._broadcast_to_rooms(domain, body_text)
 
         # Log completion
         notification_type = "title change" if title_change else "going live"
         self.log.info(
             f"[{domain}] Completed sending {notification_type} "
-            f"notifications! {successful_notifications} succeeded, "
-            f"{failed_notifications} failed."
+            f"notifications! {successful} succeeded, "
+            f"{failed} failed."
         )
 
     async def _send_notification(
@@ -153,36 +135,36 @@ class NotificationService:
         :return: Formatted message body.
         """
         # Use name if available, fallback to domain
-        stream_name = name if name else domain
+        stream_name = name or domain
         safe_stream_name = sanitize_for_plain_text(stream_name)
 
         # Choose message based on notification type
         if title_change:
-            body_text = "📝 " + safe_stream_name + " has changed its stream title!"
+            parts = [f"📝 {safe_stream_name} has changed its stream title!"]
         else:
-            body_text = "🎥 " + safe_stream_name + " is now live!"
+            parts = [f"🎥 {safe_stream_name} is now live!"]
 
         # Add title if present
-        if title != "":
+        if title:
             safe_title = sanitize_for_plain_text(title)
-            body_text += "\nStream Title: " + safe_title
+            parts.append(f"\nStream Title: {safe_title}")
 
         # Add stream URL
-        body_text += "\n\nTo tune in, visit: https://" + domain + "/"
+        parts.append(f"\n\nTo tune in, visit: https://{domain}/")
 
         # Add tags if present
         if tags:
-            safe_tags = []
-            for tag in tags:
-                safe_tag = sanitize_for_plain_text(tag)
-                if safe_tag and not safe_tag.startswith("."):
-                    safe_tags.append(safe_tag)
+            safe_tags = [
+                safe_tag
+                for tag in tags
+                if (safe_tag := sanitize_for_plain_text(tag))
+                and not safe_tag.startswith(".")
+            ]
 
             if safe_tags:
-                body_text += "\n\n"
-                body_text += " ".join("#" + tag for tag in safe_tags)
+                parts.append(f"\n\n{' '.join(f'#{tag}' for tag in safe_tags)}")
 
-        return body_text
+        return "".join(parts)
 
     def get_last_notification_time(self, domain: str) -> float:
         """Get the timestamp of the last notification sent for a domain.
@@ -201,48 +183,50 @@ class NotificationService:
         if domain not in self.notification_timers_cache:
             return True
 
-        seconds_since_last = round(time.time() - self.notification_timers_cache[domain])
-        return bool(seconds_since_last >= SECONDS_BETWEEN_NOTIFICATIONS)
+        seconds_since_last = round(
+            time.monotonic() - self.notification_timers_cache[domain]
+        )
+        return seconds_since_last >= SECONDS_BETWEEN_NOTIFICATIONS
 
     def _record_notification(self, domain: str) -> None:
         """Record that a notification was sent at the current time.
 
         :param domain: The stream domain.
         """
-        self.notification_timers_cache[domain] = time.time()
+        self.notification_timers_cache[domain] = time.monotonic()
+
+    async def _broadcast_to_rooms(self, domain: str, body_text: str) -> tuple[int, int]:
+        """Send a message to all rooms subscribed to a domain.
+
+        :param domain: The stream domain.
+        :param body_text: The message body text.
+        :return: Tuple of (successful, failed) counts.
+        """
+        room_ids = await self.subscription_repo.get_subscribed_rooms(domain)
+        tasks = [
+            self._send_notification(room_id, body_text, domain) for room_id in room_ids
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        failed = sum(1 for r in results if isinstance(r, Exception))
+        successful = len(results) - failed
+        return successful, failed
 
     async def send_cleanup_warning(self, domain: str) -> None:
         """Send cleanup warning notification to all subscribed rooms.
 
         :param domain: The stream domain.
         """
-        # Get all subscribed rooms
-        room_ids = await self.subscription_repo.get_subscribed_rooms(domain)
-
-        # Build the warning message
-        warning_days = CLEANUP_WARNING_THRESHOLD // (24 * 60)
-        delete_days = CLEANUP_DELETE_THRESHOLD // (24 * 60)
-        remaining_days = delete_days - warning_days
+        remaining_days = CLEANUP_DELETE_DAYS - CLEANUP_WARNING_DAYS
         body_text = (
             "⚠️  Warning: Subscription Cleanup Scheduled\n\n"
             f"The Owncast instance at {domain} has been "
-            f"unreachable for {warning_days} days. If it remains "
+            f"unreachable for {CLEANUP_WARNING_DAYS} days. If it remains "
             f"unreachable for {remaining_days} more days "
-            f"({delete_days} days total), this subscription "
+            f"({CLEANUP_DELETE_DAYS} days total), this subscription "
             f"will be automatically removed."
         )
 
-        # Send to all rooms in parallel
-        tasks = [
-            self._send_notification(room_id, body_text, domain) for room_id in room_ids
-        ]
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Count successes and failures
-        successful = sum(1 for r in results if not isinstance(r, Exception))
-        failed = sum(1 for r in results if isinstance(r, Exception))
-
+        successful, failed = await self._broadcast_to_rooms(domain, body_text)
         self.log.info(
             f"[{domain}] Sent cleanup warning to {successful} rooms ({failed} failed)."
         )
@@ -252,32 +236,17 @@ class NotificationService:
 
         :param domain: The stream domain.
         """
-        # Get all subscribed rooms
-        room_ids = await self.subscription_repo.get_subscribed_rooms(domain)
-
-        # Build the deletion message
-        delete_days = CLEANUP_DELETE_THRESHOLD // (24 * 60)
         body_text = (
             "🗑️  Subscription Automatically Removed\n\n"
             f"The Owncast instance at {domain} has been "
-            f"unreachable for {delete_days} days and has been "
+            f"unreachable for {CLEANUP_DELETE_DAYS} days and has been "
             f"automatically removed from subscriptions in this "
             f"room.\n\n"
             f"If the instance comes online again and you want to "
             f"resubscribe, run `!subscribe {domain}`."
         )
 
-        # Send to all rooms in parallel
-        tasks = [
-            self._send_notification(room_id, body_text, domain) for room_id in room_ids
-        ]
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Count successes and failures
-        successful = sum(1 for r in results if not isinstance(r, Exception))
-        failed = sum(1 for r in results if isinstance(r, Exception))
-
+        successful, failed = await self._broadcast_to_rooms(domain, body_text)
         self.log.info(
             f"[{domain}] Sent cleanup deletion notice to "
             f"{successful} rooms ({failed} failed)."
