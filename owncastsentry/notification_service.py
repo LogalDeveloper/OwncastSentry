@@ -80,7 +80,7 @@ class NotificationService:
         # Has enough time passed since the last notification was sent?
         if not self._can_notify(domain):
             seconds_since_last = round(
-                time.time() - self.notification_timers_cache[domain]
+                time.monotonic() - self.notification_timers_cache[domain]
             )
             self.log.info(
                 f"[{domain}] Not sending notifications. Only "
