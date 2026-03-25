@@ -14,17 +14,16 @@
 
 """Tests for the notification service."""
 
-from __future__ import annotations
-
 import logging
 import time
 from typing import TYPE_CHECKING
 
 import pytest
 
+from owncastsentry.metrics import MetricsService
 from owncastsentry.notification_service import NotificationService
 from owncastsentry.utils import SECONDS_BETWEEN_NOTIFICATIONS
-from tests.conftest import _StubMatrixClient
+from tests.conftest import _StubMatrixClient, generate_metrics_output
 
 if TYPE_CHECKING:
     from owncastsentry.database import StreamRepository, SubscriptionRepository
@@ -34,12 +33,14 @@ def _make_service(
     *,
     client: _StubMatrixClient,
     subscription_repo: SubscriptionRepository,
+    metrics: MetricsService | None = None,
 ) -> NotificationService:
     """Build a NotificationService with a stub client and real repo."""
     return NotificationService(
         client=client,
         subscription_repo=subscription_repo,
         logger=logging.getLogger("test"),
+        metrics=metrics or MetricsService(),
     )
 
 
@@ -346,3 +347,111 @@ class TestSendCleanupDeletion:
             "If the instance comes online again and you want to "
             "resubscribe, run `!subscribe example.com`."
         )
+
+
+class TestNotificationMetrics:
+    """Notification metrics recording."""
+
+    async def test_records_live_notification(
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Record a live notification metric."""
+        client = _StubMatrixClient()
+        metrics = MetricsService()
+        service = _make_service(
+            client=client, subscription_repo=subscription_repo, metrics=metrics
+        )
+        await stream_repo.create("example.com")
+        await subscription_repo.add("example.com", "!room:matrix.org")
+        await service.notify_stream_live("example.com", "Stream", "Title", [])
+        output = generate_metrics_output(metrics)
+        expected = (
+            "owncastsentry_notification_delivery_total"
+            '{result="success",type="live"} 1.0'
+        )
+        assert expected in output
+
+    async def test_records_title_change_notification(
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Record a title_change notification metric."""
+        client = _StubMatrixClient()
+        metrics = MetricsService()
+        service = _make_service(
+            client=client, subscription_repo=subscription_repo, metrics=metrics
+        )
+        await stream_repo.create("example.com")
+        await subscription_repo.add("example.com", "!room:matrix.org")
+        await service.notify_stream_live(
+            "example.com", "Stream", "Title", [], title_change=True
+        )
+        output = generate_metrics_output(metrics)
+        expected = (
+            "owncastsentry_notification_delivery_total"
+            '{result="success",type="title_change"} 1.0'
+        )
+        assert expected in output
+
+    async def test_records_cleanup_warning_notification(
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Record a cleanup_warning notification metric."""
+        client = _StubMatrixClient()
+        metrics = MetricsService()
+        service = _make_service(
+            client=client, subscription_repo=subscription_repo, metrics=metrics
+        )
+        await stream_repo.create("example.com")
+        await subscription_repo.add("example.com", "!room:matrix.org")
+        await service.send_cleanup_warning("example.com")
+        output = generate_metrics_output(metrics)
+        expected = (
+            "owncastsentry_notification_delivery_total"
+            '{result="success",type="cleanup_warning"} 1.0'
+        )
+        assert expected in output
+
+    async def test_records_cleanup_deletion_notification(
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Record a cleanup_deletion notification metric."""
+        client = _StubMatrixClient()
+        metrics = MetricsService()
+        service = _make_service(
+            client=client, subscription_repo=subscription_repo, metrics=metrics
+        )
+        await stream_repo.create("example.com")
+        await subscription_repo.add("example.com", "!room:matrix.org")
+        await service.send_cleanup_deletion("example.com")
+        output = generate_metrics_output(metrics)
+        expected = (
+            "owncastsentry_notification_delivery_total"
+            '{result="success",type="cleanup_deletion"} 1.0'
+        )
+        assert expected in output
+
+    async def test_no_metric_when_rate_limited(
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Do not record metric when notification is rate-limited."""
+        client = _StubMatrixClient()
+        metrics = MetricsService()
+        service = _make_service(
+            client=client, subscription_repo=subscription_repo, metrics=metrics
+        )
+        service.notification_timers_cache["example.com"] = time.monotonic()
+        await stream_repo.create("example.com")
+        await subscription_repo.add("example.com", "!room:matrix.org")
+        await service.notify_stream_live("example.com", "Stream", "Title", [])
+        output = generate_metrics_output(metrics)
+        assert 'result="success",type="live"} 0.0' in output

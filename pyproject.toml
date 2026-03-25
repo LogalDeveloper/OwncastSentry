@@ -7,7 +7,7 @@ authors = [
 ]
 license = "Apache-2.0"
 requires-python = ">=3.14"
-dependencies = []
+dependencies = ["prometheus_client>=0.24.1"]
 
 [project.urls]
 Repository = "https://git.logal.dev/LogalDeveloper/OwncastSentry"

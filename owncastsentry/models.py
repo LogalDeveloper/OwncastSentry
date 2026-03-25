@@ -99,20 +99,6 @@ class UpdateResult:
     successful_checks: int
     failed_checks: int
 
-    @property
-    def http_healthy(self) -> bool:
-        """Determine HTTP health based on update results.
-
-        HTTP is considered healthy if:
-        - No streams are subscribed (nothing to check), OR
-        - At least one stream check succeeded
-
-        :return: True if HTTP is considered healthy.
-        """
-        if self.total_streams == 0:
-            return True
-        return self.successful_checks > 0
-
 
 @dataclass
 class StreamConfig:

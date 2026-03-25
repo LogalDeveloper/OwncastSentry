@@ -18,7 +18,7 @@ import asyncio
 import time
 from typing import TYPE_CHECKING
 
-from .models import StreamState, UpdateResult
+from .models import StreamState, StreamStatus, UpdateResult
 from .utils import (
     CLEANUP_DELETE_THRESHOLD,
     CLEANUP_WARNING_THRESHOLD,
@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     import logging
 
     from .database import StreamRepository, SubscriptionRepository
+    from .metrics import MetricsService
     from .notification_service import NotificationService
     from .owncast_client import OwncastClient
 
@@ -44,6 +45,7 @@ class StreamMonitor:
         subscription_repo: SubscriptionRepository,
         notification_service: NotificationService,
         logger: logging.Logger,
+        metrics: MetricsService,
     ) -> None:
         """Initialize the stream monitor.
 
@@ -52,12 +54,14 @@ class StreamMonitor:
         :param subscription_repo: Repository for subscription data.
         :param notification_service: Service for sending notifications.
         :param logger: Logger instance for debugging.
+        :param metrics: Metrics service for recording Prometheus metrics.
         """
         self.owncast_client = owncast_client
         self.stream_repo = stream_repo
         self.subscription_repo = subscription_repo
         self.notification_service = notification_service
         self.log = logger
+        self.metrics = metrics
 
         # Cache for tracking when streams last went offline
         self.offline_timer_cache: dict[str, float] = {}
@@ -89,6 +93,10 @@ class StreamMonitor:
             f"Update complete. {successful_checks}/{total_streams} succeeded, "
             f"{failed_checks} failed."
         )
+
+        for domain in subscribed_domains:
+            count = await self.subscription_repo.count_by_domain(domain)
+            self.metrics.set_subscription_count(domain, count)
 
         return UpdateResult(
             total_streams=total_streams,
@@ -123,6 +131,10 @@ class StreamMonitor:
             )
             # Check cleanup thresholds even when skipping query
             await self._check_cleanup_thresholds(domain, failure_counter + 1)
+            updated_state = await self.stream_repo.get_by_domain(domain)
+            if updated_state is not None:
+                self.metrics.set_stream_status(domain, updated_state.status)
+            self.metrics.set_check_failures(domain, failure_counter + 1)
             # Backoff is expected behavior, not a failure
             return True
 
@@ -148,11 +160,16 @@ class StreamMonitor:
             )
             # Check cleanup thresholds after connection failure
             await self._check_cleanup_thresholds(domain, failure_counter + 1)
+            updated_state = await self.stream_repo.get_by_domain(domain)
+            if updated_state is not None:
+                self.metrics.set_stream_status(domain, updated_state.status)
+            self.metrics.set_check_failures(domain, failure_counter + 1)
             # Actual connection failure
             return False
 
         # Fetch succeeded! Reset failure counter
         await self.stream_repo.reset_failure_counter(domain)
+        self.metrics.set_check_failures(domain, 0)
 
         # Initialize timer cache entries to prevent KeyError on first access
         self.offline_timer_cache.setdefault(domain, 0)
@@ -300,6 +317,10 @@ class StreamMonitor:
 
         # All done.
         self.log.debug(f"[{domain}] State update completed.")
+        if new_state.last_connect_time is not None:
+            self.metrics.set_stream_status(domain, StreamStatus.ONLINE)
+        else:
+            self.metrics.set_stream_status(domain, StreamStatus.OFFLINE)
         return True
 
     async def _check_cleanup_thresholds(self, domain: str, counter: int) -> None:
@@ -335,3 +356,4 @@ class StreamMonitor:
                 f"Deleted {deleted_count} subscriptions "
                 f"and stream record."
             )
+            self.metrics.remove_stream(domain)

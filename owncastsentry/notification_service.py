@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from mautrix.types import MessageType, TextMessageEventContent
 
+from .metrics import NotificationType
 from .utils import (
     CLEANUP_DELETE_DAYS,
     CLEANUP_WARNING_DAYS,
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     import logging
 
     from .database import SubscriptionRepository
+    from .metrics import MetricsService
 
 
 class NotificationService:
@@ -41,16 +43,19 @@ class NotificationService:
         client: Any,
         subscription_repo: SubscriptionRepository,
         logger: logging.Logger,
+        metrics: MetricsService,
     ) -> None:
         """Initialize the notification service.
 
         :param client: The Matrix client for sending messages.
         :param subscription_repo: Repository for managing subscriptions.
         :param logger: Logger instance for debugging.
+        :param metrics: Metrics service for recording counters.
         """
         self.client = client
         self.subscription_repo = subscription_repo
         self.log = logger
+        self.metrics = metrics
 
         # Cache for tracking when notifications were last sent
         self.notification_timers_cache: dict[str, float] = {}
@@ -100,6 +105,12 @@ class NotificationService:
             f"[{domain}] Completed sending {notification_type} "
             f"notifications! {successful} succeeded, "
             f"{failed} failed."
+        )
+
+        self.metrics.record_delivery(
+            NotificationType.TITLE_CHANGE if title_change else NotificationType.LIVE,
+            successful=successful,
+            failed=failed,
         )
 
     async def _send_notification(
@@ -231,6 +242,10 @@ class NotificationService:
             f"[{domain}] Sent cleanup warning to {successful} rooms ({failed} failed)."
         )
 
+        self.metrics.record_delivery(
+            NotificationType.CLEANUP_WARNING, successful=successful, failed=failed
+        )
+
     async def send_cleanup_deletion(self, domain: str) -> None:
         """Send cleanup deletion notification to all subscribed rooms.
 
@@ -250,4 +265,8 @@ class NotificationService:
         self.log.info(
             f"[{domain}] Sent cleanup deletion notice to "
             f"{successful} rooms ({failed} failed)."
+        )
+
+        self.metrics.record_delivery(
+            NotificationType.CLEANUP_DELETION, successful=successful, failed=failed
         )

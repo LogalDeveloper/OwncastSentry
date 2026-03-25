@@ -16,13 +16,15 @@
 
 from typing import TYPE_CHECKING
 
+from aiohttp import web
 from maubot import MessageEvent, Plugin  # type: ignore[attr-defined]
 from maubot.handlers import command
+from prometheus_client.exposition import choose_encoder
 
 from .commands import CommandHandler
 from .config import Config
 from .database import StreamRepository, SubscriptionRepository
-from .health_checker import HealthChecker
+from .metrics import ErrorSource, MetricsService
 from .migrations import get_upgrade_table
 from .notification_service import NotificationService
 from .owncast_client import OwncastClient
@@ -57,8 +59,21 @@ class OwncastSentry(Plugin):
         config.load_and_update()
         db: Database = self.database  # type: ignore[assignment]
 
+        # Initialize metrics service and register web endpoint (if enabled)
+        self.metrics_service = MetricsService()
+        self.metrics_service.set_build_info(str(self.loader.meta.version))
+        if config.metrics_enabled and self.webapp is not None:
+            self.webapp.add_route(
+                method="GET", path="/metrics", handler=self._metrics_endpoint
+            )
+
         # Initialize the Owncast API client
-        self.owncast_client = OwncastClient(self.log, str(self.loader.meta.version))
+        self.owncast_client = OwncastClient(
+            self.log, str(self.loader.meta.version), metrics=self.metrics_service
+        )
+        self.metrics_service.register_open_connections_gauge(
+            lambda: self.owncast_client.open_connection_count
+        )
 
         # Initialize repositories
         self.stream_repo = StreamRepository(db)
@@ -66,7 +81,10 @@ class OwncastSentry(Plugin):
 
         # Initialize notification service
         self.notification_service = NotificationService(
-            self.client, self.subscription_repo, self.log
+            self.client,
+            self.subscription_repo,
+            self.log,
+            metrics=self.metrics_service,
         )
 
         # Initialize stream monitor
@@ -76,13 +94,7 @@ class OwncastSentry(Plugin):
             self.subscription_repo,
             self.notification_service,
             self.log,
-        )
-
-        # Initialize health checker
-        self.health_checker = HealthChecker(
-            db,
-            self.owncast_client,
-            self.log,
+            metrics=self.metrics_service,
         )
 
         # Initialize command handler
@@ -97,41 +109,69 @@ class OwncastSentry(Plugin):
         self.sched.run_periodically(60, self._update_all_stream_states)
 
     async def _update_all_stream_states(self) -> None:
-        """Update all stream states and perform health check."""
-        # Get list of all stream domains with active subscriptions
-        subscribed_domains = await self.subscription_repo.get_all_subscribed_domains()
+        """Update all stream states."""
+        try:
+            # Get list of all stream domains with active subscriptions
+            subscribed_domains = (
+                await self.subscription_repo.get_all_subscribed_domains()
+            )
 
-        # Delegate to stream monitor and get results
-        update_result = await self.stream_monitor.update_all_streams(subscribed_domains)
-
-        # Perform health check
-        config: Config = self.config  # type: ignore[assignment]
-        await self.health_checker.perform_health_check(
-            update_result,
-            config.health_check_endpoint,
-        )
+            # Delegate to stream monitor
+            await self.stream_monitor.update_all_streams(subscribed_domains)
+        except Exception:
+            self.metrics_service.record_error(ErrorSource.SCHEDULER_LOOP)
+            self.log.exception("Unhandled exception in scheduler loop.")
 
     @command.new(help="Subscribes to a new Owncast stream.")
     @command.argument("url")
     async def subscribe(self, evt: MessageEvent, url: str) -> None:
         """Delegate subscribe command to CommandHandler."""
-        await self.command_handler.subscribe(evt, url)
+        try:
+            await self.command_handler.subscribe(evt, url)
+        except Exception:
+            self.metrics_service.record_error(ErrorSource.COMMAND)
+            self.log.exception("Unhandled exception in subscribe command.")
+            await evt.reply("An unexpected error occurred. Please try again later.")
 
     @command.new(help="Unsubscribes from an Owncast stream.")
     @command.argument("url")
     async def unsubscribe(self, evt: MessageEvent, url: str) -> None:
         """Delegate unsubscribe command to CommandHandler."""
-        await self.command_handler.unsubscribe(evt, url)
+        try:
+            await self.command_handler.unsubscribe(evt, url)
+        except Exception:
+            self.metrics_service.record_error(ErrorSource.COMMAND)
+            self.log.exception("Unhandled exception in unsubscribe command.")
+            await evt.reply("An unexpected error occurred. Please try again later.")
 
     @command.new(help="Lists all stream subscriptions in this room.")
     async def subscriptions(self, evt: MessageEvent) -> None:
         """Delegate subscriptions command to CommandHandler."""
-        await self.command_handler.subscriptions(evt)
+        try:
+            await self.command_handler.subscriptions(evt)
+        except Exception:
+            self.metrics_service.record_error(ErrorSource.COMMAND)
+            self.log.exception("Unhandled exception in subscriptions command.")
+            await evt.reply("An unexpected error occurred. Please try again later.")
 
     @command.new(help="Lists currently live streams in this room.")
     async def live(self, evt: MessageEvent) -> None:
         """Delegate live command to CommandHandler."""
-        await self.command_handler.live(evt)
+        try:
+            await self.command_handler.live(evt)
+        except Exception:
+            self.metrics_service.record_error(ErrorSource.COMMAND)
+            self.log.exception("Unhandled exception in live command.")
+            await evt.reply("An unexpected error occurred. Please try again later.")
+
+    async def _metrics_endpoint(self, request: web.Request) -> web.Response:
+        """Serve Prometheus metrics."""
+        accept = request.headers.get("Accept", "")
+        encoder, content_type = choose_encoder(accept)
+        output = encoder(self.metrics_service.registry)
+        response = web.Response(body=output)
+        response.headers["Content-Type"] = content_type
+        return response
 
     async def stop(self) -> None:
         """Clean up resources by closing the HTTP session."""

@@ -29,17 +29,26 @@ from .utils import (
 if TYPE_CHECKING:
     import logging
 
+    from .metrics import MetricsService
+
 
 class OwncastClient:
     """HTTP client for communicating with Owncast instances."""
 
-    def __init__(self, logger: logging.Logger, version: str) -> None:
+    def __init__(
+        self,
+        logger: logging.Logger,
+        version: str,
+        metrics: MetricsService,
+    ) -> None:
         """Initialize the Owncast client with an HTTP session.
 
         :param logger: Logger instance for debugging
         :param version: Plugin version string for the User-Agent header
+        :param metrics: Metrics service for recording response times.
         """
         self.log = logger
+        self.metrics = metrics
 
         # Set up HTTP session configuration
         headers = {"User-Agent": user_agent(version)}
@@ -100,21 +109,24 @@ class OwncastClient:
         :return: A StreamState if available, None on error.
         """
         self.log.debug(f"[{domain}] Fetching current stream state...")
-        new_state = await self._fetch_json(domain, OWNCAST_STATUS_PATH)
-        if new_state is None:
-            return None
+        with self.metrics.response_timer(domain) as timer:
+            new_state = await self._fetch_json(domain, OWNCAST_STATUS_PATH)
 
-        # Validate the response contains all basic info needed
-        missing = REQUIRED_STATUS_FIELDS - new_state.keys()
-        if missing:
-            self.log.warning(
-                f"[{domain}] Rejecting response to request on "
-                f"{OWNCAST_STATUS_PATH} as it is missing "
-                f"fields: {', '.join(sorted(missing))}"
-            )
-            return None
+            if new_state is None:
+                return None
 
-        return StreamState.from_api_response(new_state, domain)
+            # Validate the response contains all basic info needed
+            missing = REQUIRED_STATUS_FIELDS - new_state.keys()
+            if missing:
+                self.log.warning(
+                    f"[{domain}] Rejecting response to request on "
+                    f"{OWNCAST_STATUS_PATH} as it is missing "
+                    f"fields: {', '.join(sorted(missing))}"
+                )
+                return None
+
+            timer.success()
+            return StreamState.from_api_response(new_state, domain)
 
     async def get_stream_config(self, domain: str) -> StreamConfig | None:
         """Get the current stream config for a given domain.
@@ -126,11 +138,13 @@ class OwncastClient:
         :return: A StreamConfig, or None if fetch failed.
         """
         self.log.debug(f"[{domain}] Fetching current stream config...")
-        config = await self._fetch_json(domain, OWNCAST_CONFIG_PATH)
-        if config is None:
-            return None
+        with self.metrics.response_timer(domain) as timer:
+            config = await self._fetch_json(domain, OWNCAST_CONFIG_PATH)
+            if config is None:
+                return None
 
-        return StreamConfig.from_api_response(config)
+            timer.success()
+            return StreamConfig.from_api_response(config)
 
     async def validate_instance(self, domain: str) -> bool:
         """Validate that a domain is a valid Owncast instance.
@@ -140,6 +154,16 @@ class OwncastClient:
         """
         state = await self.get_stream_state(domain)
         return state is not None
+
+    @property
+    def open_connection_count(self) -> int:
+        """Return the total number of open HTTP connections."""
+        connector = self.session.connector
+        if connector is None:
+            return 0
+        idle = sum(len(conns) for conns in connector._conns.values())
+        active = len(connector._acquired)
+        return idle + active
 
     async def close(self) -> None:
         """Close the HTTP session."""

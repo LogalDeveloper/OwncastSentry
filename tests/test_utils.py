@@ -14,8 +14,6 @@
 
 """Tests for utility functions and constants."""
 
-from __future__ import annotations
-
 import pytest
 
 from owncastsentry.utils import (

@@ -14,13 +14,12 @@
 
 """Shared test fixtures and stubs for OwncastSentry tests."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import pytest
 from mautrix.util.async_db import Database
+from prometheus_client import generate_latest
 
 from owncastsentry import OwncastSentry
 from owncastsentry.config import Config
@@ -31,7 +30,13 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
+    from owncastsentry.metrics import MetricsService
     from owncastsentry.models import StreamConfig, StreamState
+
+
+def generate_metrics_output(metrics: MetricsService) -> str:
+    """Generate Prometheus text format output from a MetricsService registry."""
+    return generate_latest(metrics.registry).decode("utf-8")
 
 
 @pytest.fixture

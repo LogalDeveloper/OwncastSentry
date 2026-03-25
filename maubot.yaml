@@ -8,5 +8,8 @@ main_class: OwncastSentry
 database: true
 database_type: asyncpg
 config: true
+webapp: true
+dependencies:
+  - prometheus_client>=0.24.1
 extra_files:
   - base-config.yaml

@@ -14,8 +14,6 @@
 
 """Tests for data models."""
 
-from __future__ import annotations
-
 import pytest
 
 from owncastsentry.models import StreamConfig, StreamState, StreamStatus

@@ -14,13 +14,12 @@
 
 """Tests for the stream monitor."""
 
-from __future__ import annotations
-
 import logging
 import time
 from typing import TYPE_CHECKING
 
-from owncastsentry.models import StreamConfig, StreamState
+from owncastsentry.metrics import MetricsService
+from owncastsentry.models import StreamConfig, StreamState, StreamStatus
 from owncastsentry.notification_service import NotificationService
 from owncastsentry.stream_monitor import StreamMonitor
 from owncastsentry.utils import (
@@ -28,7 +27,11 @@ from owncastsentry.utils import (
     CLEANUP_WARNING_THRESHOLD,
     SECONDS_BETWEEN_NOTIFICATIONS,
 )
-from tests.conftest import _StubMatrixClient, _StubOwncastClient
+from tests.conftest import (
+    _StubMatrixClient,
+    _StubOwncastClient,
+    generate_metrics_output,
+)
 
 if TYPE_CHECKING:
     from owncastsentry.database import StreamRepository, SubscriptionRepository
@@ -40,13 +43,16 @@ def _make_monitor(
     stream_repo: StreamRepository,
     subscription_repo: SubscriptionRepository,
     client: _StubMatrixClient,
+    metrics: MetricsService | None = None,
 ) -> tuple[StreamMonitor, NotificationService]:
     """Build a StreamMonitor with stubs and a real NotificationService."""
     logger = logging.getLogger("test")
+    metrics = metrics or MetricsService()
     notification_service = NotificationService(
         client=client,
         subscription_repo=subscription_repo,
         logger=logger,
+        metrics=metrics,
     )
     monitor = StreamMonitor(
         owncast_client=owncast_client,
@@ -54,6 +60,7 @@ def _make_monitor(
         subscription_repo=subscription_repo,
         notification_service=notification_service,
         logger=logger,
+        metrics=metrics,
     )
     return monitor, notification_service
 
@@ -80,6 +87,25 @@ async def _seed_stream(
     )
     await stream_repo.update(state)
     await subscription_repo.add(domain, room_id)
+
+
+def _make_monitor_with_metrics(
+    *,
+    owncast_client: _StubOwncastClient,
+    stream_repo: StreamRepository,
+    subscription_repo: SubscriptionRepository,
+    client: _StubMatrixClient,
+) -> tuple[StreamMonitor, NotificationService, MetricsService]:
+    """Build a StreamMonitor with stubs, a real NotificationService, and metrics."""
+    metrics = MetricsService()
+    monitor, notification_service = _make_monitor(
+        owncast_client=owncast_client,
+        stream_repo=stream_repo,
+        subscription_repo=subscription_repo,
+        client=client,
+        metrics=metrics,
+    )
+    return monitor, notification_service, metrics
 
 
 class TestUpdateAllStreams:
@@ -837,3 +863,178 @@ class TestUpdateAllStreamsMixed:
         assert result.total_streams == 2
         assert result.successful_checks == 1
         assert result.failed_checks == 1
+
+
+class TestStreamMonitorMetrics:
+    """Stream monitor metrics recording."""
+
+    async def test_records_stream_status_online(
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Record online stream status gauge."""
+        owncast = _StubOwncastClient(
+            stream_state=StreamState(
+                domain="live.com",
+                title="Title",
+                last_connect_time="2026-01-01T12:00:00Z",
+                last_disconnect_time="2026-01-01T10:00:00Z",
+            ),
+            stream_config=StreamConfig(name="Live Stream"),
+        )
+        client = _StubMatrixClient()
+        monitor, _, metrics = _make_monitor_with_metrics(
+            owncast_client=owncast,
+            stream_repo=stream_repo,
+            subscription_repo=subscription_repo,
+            client=client,
+        )
+        await _seed_stream(
+            stream_repo,
+            subscription_repo,
+            domain="live.com",
+            last_disconnect_time="2026-01-01T10:00:00Z",
+        )
+        monitor.offline_timer_cache["live.com"] = 0
+        await monitor.update_stream("live.com")
+        output = generate_metrics_output(metrics)
+        assert 'owncastsentry_stream_status{domain="live.com"} 1.0' in output
+
+    async def test_records_stream_status_offline(
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Record offline stream status gauge."""
+        owncast = _StubOwncastClient(
+            stream_state=StreamState(
+                domain="off.com",
+                title="Title",
+                last_disconnect_time="2026-01-01T12:00:00Z",
+            ),
+            stream_config=StreamConfig(name="Off Stream"),
+        )
+        client = _StubMatrixClient()
+        monitor, _, metrics = _make_monitor_with_metrics(
+            owncast_client=owncast,
+            stream_repo=stream_repo,
+            subscription_repo=subscription_repo,
+            client=client,
+        )
+        await _seed_stream(
+            stream_repo,
+            subscription_repo,
+            domain="off.com",
+            title="Title",
+            last_disconnect_time="2026-01-01T12:00:00Z",
+        )
+        await monitor.update_stream("off.com")
+        output = generate_metrics_output(metrics)
+        assert 'owncastsentry_stream_status{domain="off.com"} 0.0' in output
+
+    async def test_records_check_failures_on_connection_failure(
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Record failure counter gauge when a stream check fails."""
+        owncast = _StubOwncastClient(stream_state=None)
+        client = _StubMatrixClient()
+        monitor, _, metrics = _make_monitor_with_metrics(
+            owncast_client=owncast,
+            stream_repo=stream_repo,
+            subscription_repo=subscription_repo,
+            client=client,
+        )
+        await _seed_stream(
+            stream_repo,
+            subscription_repo,
+            domain="fail.com",
+            last_disconnect_time="2026-01-01T00:00:00Z",
+        )
+        await monitor.update_stream("fail.com")
+        output = generate_metrics_output(metrics)
+        assert 'owncastsentry_check_failures{domain="fail.com"} 1.0' in output
+
+    async def test_resets_check_failures_on_success(
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Reset failure counter gauge to zero on successful check."""
+        owncast = _StubOwncastClient(
+            stream_state=StreamState(
+                domain="recover.com",
+                title="Title",
+                last_disconnect_time="2026-01-01T12:00:00Z",
+            ),
+            stream_config=StreamConfig(name="Recover"),
+        )
+        client = _StubMatrixClient()
+        monitor, _, metrics = _make_monitor_with_metrics(
+            owncast_client=owncast,
+            stream_repo=stream_repo,
+            subscription_repo=subscription_repo,
+            client=client,
+        )
+        await _seed_stream(
+            stream_repo,
+            subscription_repo,
+            domain="recover.com",
+            last_disconnect_time="2026-01-01T12:00:00Z",
+        )
+        # Simulate prior failures
+        for _ in range(3):
+            await stream_repo.increment_failure_counter("recover.com")
+        await monitor.update_stream("recover.com")
+        output = generate_metrics_output(metrics)
+        assert 'owncastsentry_check_failures{domain="recover.com"} 0.0' in output
+
+    async def test_removes_stream_on_cleanup_deletion(
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Remove stream gauge label on cleanup deletion."""
+        owncast = _StubOwncastClient()
+        client = _StubMatrixClient()
+        monitor, _, metrics = _make_monitor_with_metrics(
+            owncast_client=owncast,
+            stream_repo=stream_repo,
+            subscription_repo=subscription_repo,
+            client=client,
+        )
+        await _seed_stream(stream_repo, subscription_repo, domain="delete.com")
+        metrics.set_stream_status("delete.com", StreamStatus.OFFLINE)
+        assert 'domain="delete.com"' in generate_metrics_output(metrics)
+
+        await monitor._check_cleanup_thresholds("delete.com", CLEANUP_DELETE_THRESHOLD)
+        assert 'domain="delete.com"' not in generate_metrics_output(metrics)
+
+    async def test_records_subscription_counts(
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Record per-domain subscription counts after update_all_streams."""
+        owncast = _StubOwncastClient(
+            stream_state=StreamState(
+                domain="pop.com",
+                last_connect_time="2026-01-01T00:00:00Z",
+            ),
+            stream_config=StreamConfig(name="Popular"),
+        )
+        client = _StubMatrixClient()
+        monitor, _, metrics = _make_monitor_with_metrics(
+            owncast_client=owncast,
+            stream_repo=stream_repo,
+            subscription_repo=subscription_repo,
+            client=client,
+        )
+        await stream_repo.create("pop.com")
+        await subscription_repo.add("pop.com", "!room1:matrix.org")
+        await subscription_repo.add("pop.com", "!room2:matrix.org")
+        await monitor.update_all_streams(["pop.com"])
+        output = generate_metrics_output(metrics)
+        assert 'owncastsentry_stream_subscriptions{domain="pop.com"} 2.0' in output

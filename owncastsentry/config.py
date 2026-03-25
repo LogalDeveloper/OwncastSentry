@@ -25,9 +25,9 @@ class Config(BaseProxyConfig):
 
         :param helper: ConfigUpdateHelper for copying values.
         """
-        helper.copy("health_check_endpoint")
+        helper.copy("metrics_enabled")
 
     @property
-    def health_check_endpoint(self) -> str:
-        """Return the configured health check endpoint URL."""
-        return self["health_check_endpoint"]  # type: ignore[no-any-return]
+    def metrics_enabled(self) -> bool:
+        """Return whether the Prometheus metrics endpoint is enabled."""
+        return self["metrics_enabled"]  # type: ignore[no-any-return]

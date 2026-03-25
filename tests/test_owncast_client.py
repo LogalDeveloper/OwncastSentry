@@ -14,8 +14,6 @@
 
 """Tests for the Owncast HTTP client."""
 
-from __future__ import annotations
-
 import json
 import logging
 from typing import TYPE_CHECKING
@@ -23,8 +21,13 @@ from typing import TYPE_CHECKING
 import pytest
 from aioresponses import aioresponses
 
+from owncastsentry.metrics import MetricsService
 from owncastsentry.owncast_client import OwncastClient
-from tests.conftest import VALID_CONFIG_RESPONSE, VALID_STATUS_RESPONSE
+from tests.conftest import (
+    VALID_CONFIG_RESPONSE,
+    VALID_STATUS_RESPONSE,
+    generate_metrics_output,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -33,7 +36,11 @@ if TYPE_CHECKING:
 @pytest.fixture
 async def owncast_client() -> AsyncIterator[OwncastClient]:
     """Create an OwncastClient and close it after the test."""
-    client = OwncastClient(logger=logging.getLogger("test"), version="0.0.0")
+    client = OwncastClient(
+        logger=logging.getLogger("test"),
+        version="0.0.0",
+        metrics=MetricsService(),
+    )
     yield client
     await client.close()
 
@@ -205,3 +212,69 @@ class TestValidateInstance:
             result = await owncast_client.validate_instance("invalid.com")
 
         assert result is False
+
+
+class TestResponseTimeMetrics:
+    """Response time histogram recording."""
+
+    async def test_records_on_success(self) -> None:
+        """Record response time on a successful request."""
+        metrics = MetricsService()
+        client = OwncastClient(
+            logger=logging.getLogger("test"),
+            version="0.0.0",
+            metrics=metrics,
+        )
+        with aioresponses() as mocked:
+            mocked.get(
+                "https://example.com/api/status",
+                body=json.dumps(VALID_STATUS_RESPONSE).encode(),
+            )
+            await client.get_stream_state("example.com")
+        output = generate_metrics_output(metrics)
+        assert 'owncastsentry_api_response_seconds{domain="example.com"}' in output
+        await client.close()
+
+    async def test_no_observation_on_failure(self) -> None:
+        """Do not record response time when request fails."""
+        metrics = MetricsService()
+        client = OwncastClient(
+            logger=logging.getLogger("test"),
+            version="0.0.0",
+            metrics=metrics,
+        )
+        with aioresponses() as mocked:
+            mocked.get(
+                "https://example.com/api/status",
+                status=500,
+            )
+            await client.get_stream_state("example.com")
+        output = generate_metrics_output(metrics)
+        assert 'owncastsentry_api_response_seconds{domain="example.com"}' not in output
+        await client.close()
+
+    async def test_no_observation_on_connection_error(self) -> None:
+        """Do not record response time on connection error."""
+        metrics = MetricsService()
+        client = OwncastClient(
+            logger=logging.getLogger("test"),
+            version="0.0.0",
+            metrics=metrics,
+        )
+        with aioresponses() as mocked:
+            mocked.get(
+                "https://example.com/api/status",
+                exception=ConnectionError(),
+            )
+            await client.get_stream_state("example.com")
+        output = generate_metrics_output(metrics)
+        assert 'owncastsentry_api_response_seconds{domain="example.com"}' not in output
+        await client.close()
+
+
+class TestOpenConnectionCount:
+    """Open connection count."""
+
+    async def test_zero_with_no_requests(self, owncast_client: OwncastClient) -> None:
+        """Return zero when no requests have been made."""
+        assert owncast_client.open_connection_count == 0
