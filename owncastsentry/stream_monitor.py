@@ -82,12 +82,24 @@ class StreamMonitor:
         # Build a list of async tasks for each stream domain
         # Run all stream updates in parallel and collect results
         results = await asyncio.gather(
-            *(self.update_stream(domain) for domain in subscribed_domains)
+            *(self.update_stream(domain) for domain in subscribed_domains),
+            return_exceptions=True,
         )
 
         # Count successes and failures
-        successful_checks = results.count(True)
-        failed_checks = results.count(False)
+        successful_checks = 0
+        failed_checks = 0
+        for domain, result in zip(subscribed_domains, results, strict=True):
+            if isinstance(result, BaseException):
+                self.log.exception(
+                    f"[{domain}] Unhandled exception during stream update.",
+                    exc_info=result,
+                )
+                failed_checks += 1
+            elif result:
+                successful_checks += 1
+            else:
+                failed_checks += 1
 
         self.log.debug(
             f"Update complete. {successful_checks}/{total_streams} succeeded, "
