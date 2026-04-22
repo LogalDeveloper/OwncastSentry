@@ -50,7 +50,7 @@ jobs:
           echo "SHA256: $(sha256sum owncastsentry-v${{ steps.version.outputs.version }}.mbp)"
 
       - name: Upload plugin artifact
-        uses: https://github.com/christopherhx/gitea-upload-artifact@62ac910c5d3dfa85c7cb2df15afe2e342b2407c2 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: owncastsentry-v${{ steps.version.outputs.version }}
           path: owncastsentry-v${{ steps.version.outputs.version }}.mbp
+          archive: false
