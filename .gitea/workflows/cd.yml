@@ -50,10 +50,7 @@ jobs:
           echo "SHA256: $(sha256sum owncastsentry-v${{ steps.version.outputs.version }}.mbp)"
 
       - name: Upload plugin artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        env:
-          # Spoof to escape the action's isGHES check on Gitea.
-          GITHUB_SERVER_URL: https://github.com
+        uses: https://github.com/christopherhx/gitea-upload-artifact@8818363695ca2d5782c64f6453273341374767b7 # v7
         with:
           path: owncastsentry-v${{ steps.version.outputs.version }}.mbp
           archive: false
