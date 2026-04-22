@@ -5,6 +5,10 @@ on:
     branches: [master]
     tags: ["v*"]
 
+permissions:
+  contents: read
+  # packages: write  # not yet supported by Gitea
+
 jobs:
   build:
     name: Build
