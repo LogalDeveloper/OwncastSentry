@@ -51,6 +51,9 @@ jobs:
 
       - name: Upload plugin artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        env:
+          # Spoof to escape the action's isGHES check on Gitea.
+          GITHUB_SERVER_URL: https://github.com
         with:
           path: owncastsentry-v${{ steps.version.outputs.version }}.mbp
           archive: false
