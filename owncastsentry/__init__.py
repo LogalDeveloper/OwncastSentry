@@ -14,6 +14,8 @@
 
 """OwncastSentry maubot plugin."""
 
+import asyncio
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from aiohttp import web
@@ -110,8 +112,18 @@ class OwncastSentry(Plugin):
             self.subscription_manager,
         )
 
-        # Schedule periodic stream state updates every 60 seconds
-        self.sched.run_periodically(60, self._update_all_stream_states)
+        # Schedule stream state updates at the top of each wall-clock minute.
+        self.sched.run_later(0, self._run_stream_updates_every_minute())
+
+    async def _run_stream_updates_every_minute(self) -> None:
+        """Run stream state updates at the top of each wall-clock minute."""
+        while True:
+            current_time = datetime.now(UTC)
+            delay = 60 - current_time.second - (
+                current_time.microsecond / 1_000_000
+            )
+            await asyncio.sleep(delay)
+            await self._update_all_stream_states()
 
     async def _update_all_stream_states(self) -> None:
         """Update all stream states."""
