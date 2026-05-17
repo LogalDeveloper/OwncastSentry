@@ -119,9 +119,7 @@ class OwncastSentry(Plugin):
         """Run stream state updates at the top of each wall-clock minute."""
         while True:
             current_time = datetime.now(UTC)
-            delay = 60 - current_time.second - (
-                current_time.microsecond / 1_000_000
-            )
+            delay = 60 - current_time.second - (current_time.microsecond / 1_000_000)
             await asyncio.sleep(delay)
             await self._update_all_stream_states()
 
