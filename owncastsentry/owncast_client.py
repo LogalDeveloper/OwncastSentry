@@ -120,8 +120,7 @@ class OwncastClient:
             async with self.session.get(url, allow_redirects=False) as response:
                 if response.status != 200:
                     self.log.warning(
-                        "[%s] Response to request on %s was not 200, "
-                        "got %s instead.",
+                        "[%s] Response to request on %s was not 200, got %s instead.",
                         domain,
                         path,
                         response.status,
@@ -159,9 +158,7 @@ class OwncastClient:
                     )
                     return None
         except (aiohttp.ClientError, TimeoutError, OSError) as e:
-            self.log.warning(
-                "[%s] Error making GET request to %s: %s", domain, path, e
-            )
+            self.log.warning("[%s] Error making GET request to %s: %s", domain, path, e)
             return None
 
     async def get_stream_state(self, domain: str) -> StreamState | None:

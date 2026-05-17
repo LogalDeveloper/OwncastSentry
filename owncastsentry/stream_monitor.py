@@ -377,8 +377,7 @@ class StreamMonitor:
         # Check for 90-day deletion threshold
         if counter >= _CLEANUP_DELETE_THRESHOLD:
             self.log.warning(
-                "[%s] Reached 90-day deletion threshold. "
-                "Removing all subscriptions.",
+                "[%s] Reached 90-day deletion threshold. Removing all subscriptions.",
                 domain,
             )
             # Send deletion notification
@@ -393,8 +392,7 @@ class StreamMonitor:
             self.notification_service.clear_notification_state(domain)
 
             self.log.info(
-                "[%s] Cleanup complete. Deleted %s subscriptions "
-                "and stream record.",
+                "[%s] Cleanup complete. Deleted %s subscriptions and stream record.",
                 domain,
                 deleted_count,
             )

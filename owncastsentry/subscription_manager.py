@@ -87,9 +87,7 @@ class SubscriptionManager:
         if await self.stream_repo.create(stream_domain):
             self.log.info("[%s] Discovered new stream!", stream_domain)
 
-        self.log.info(
-            "[%s] Subscription added for room %s.", stream_domain, room_id
-        )
+        self.log.info("[%s] Subscription added for room %s.", stream_domain, room_id)
         return stream_domain
 
     async def unsubscribe(self, room_id: str, url: str) -> str:
@@ -103,9 +101,7 @@ class SubscriptionManager:
         stream_domain = _domainify(url)
         await self.subscription_repo.remove(stream_domain, room_id)
 
-        self.log.info(
-            "[%s] Subscription removed for room %s.", stream_domain, room_id
-        )
+        self.log.info("[%s] Subscription removed for room %s.", stream_domain, room_id)
         return stream_domain
 
     async def list_room_subscriptions(self, room_id: str) -> list[RoomSubscription]:

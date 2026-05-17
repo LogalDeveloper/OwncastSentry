@@ -423,9 +423,7 @@ class TestResponseTimeMetrics:
                 )
                 await client.get_stream_state("example.com")
             output = generate_metrics_output(metrics)
-            assert (
-                'owncastsentry_api_response_seconds{domain="example.com"}' in output
-            )
+            assert 'owncastsentry_api_response_seconds{domain="example.com"}' in output
         finally:
             await client.close()
 
@@ -446,8 +444,7 @@ class TestResponseTimeMetrics:
                 await client.get_stream_state("example.com")
             output = generate_metrics_output(metrics)
             assert (
-                'owncastsentry_api_response_seconds{domain="example.com"}'
-                not in output
+                'owncastsentry_api_response_seconds{domain="example.com"}' not in output
             )
         finally:
             await client.close()
@@ -469,8 +466,7 @@ class TestResponseTimeMetrics:
                 await client.get_stream_state("example.com")
             output = generate_metrics_output(metrics)
             assert (
-                'owncastsentry_api_response_seconds{domain="example.com"}'
-                not in output
+                'owncastsentry_api_response_seconds{domain="example.com"}' not in output
             )
         finally:
             await client.close()

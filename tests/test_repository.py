@@ -117,9 +117,7 @@ class TestHasRoomSubscriptions:
         self, subscription_repo: SubscriptionRepository
     ) -> None:
         """Return False when the room has no subscriptions."""
-        assert not await subscription_repo.has_room_subscriptions(
-            "!nobody:example.com"
-        )
+        assert not await subscription_repo.has_room_subscriptions("!nobody:example.com")
 
 
 class TestGetRoomSubscriptions:

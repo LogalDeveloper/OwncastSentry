@@ -77,7 +77,7 @@ def _format_duration(timestamp_str: str, now: datetime) -> str:
             return f"{hours} hour{'s' if hours != 1 else ''}"
         days = seconds // 86400
         return f"{days} day{'s' if days != 1 else ''}"
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return "unknown duration"
 
 
@@ -133,8 +133,7 @@ class CommandHandler:
             )
         except NotSubscribedError as e:
             await evt.reply(
-                "This room is already not subscribed to "
-                f"notifications for {e.domain}."
+                f"This room is already not subscribed to notifications for {e.domain}."
             )
             return
 
