@@ -14,22 +14,59 @@
 
 """HTTP client for querying Owncast instance APIs."""
 
+import json
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
 
-from .models import StreamConfig, StreamState
-from .utils import (
-    OWNCAST_CONFIG_PATH,
-    OWNCAST_STATUS_PATH,
-    REQUIRED_STATUS_FIELDS,
-    user_agent,
-)
+from .types import InvalidApiResponseError, StreamConfig, StreamState
 
 if TYPE_CHECKING:
     import logging
 
     from .metrics import MetricsService
+
+
+_OWNCAST_STATUS_PATH = "/api/status"
+_OWNCAST_CONFIG_PATH = "/api/config"
+_MAX_JSON_RESPONSE_BYTES = 1024 * 1024
+_JSON_READ_CHUNK_BYTES = 64 * 1024
+_HTTP_CONNECTION_LIMIT = 1000
+_HTTP_CONNECTION_LIMIT_PER_HOST = 1
+_HTTP_KEEPALIVE_TIMEOUT_SECONDS = 120
+_HTTP_CONNECT_TIMEOUT_SECONDS = 5
+_HTTP_READ_TIMEOUT_SECONDS = 5
+
+
+def _user_agent(version: str) -> str:
+    """Build the User-Agent header string for HTTP requests."""
+    return (
+        f"OwncastSentry/{version}"
+        " (bot; +https://git.logal.dev/LogalDeveloper/OwncastSentry)"
+    )
+
+
+async def _read_limited_response_body(
+    response: aiohttp.ClientResponse,
+) -> bytearray | None:
+    """Read a response body while enforcing the maximum JSON response size."""
+    # Check Content-Length first when the server provides it so clearly
+    # oversized responses can be rejected before buffering any body bytes.
+    if (
+        response.content_length is not None
+        and response.content_length > _MAX_JSON_RESPONSE_BYTES
+    ):
+        return None
+
+    body = bytearray()
+    # Read until EOF instead of using one read(n) call. aiohttp's read(n)
+    # may return a partial body as soon as data is available.
+    async for chunk in response.content.iter_chunked(_JSON_READ_CHUNK_BYTES):
+        body.extend(chunk)
+        if len(body) > _MAX_JSON_RESPONSE_BYTES:
+            return None
+
+    return body
 
 
 class OwncastClient:
@@ -51,15 +88,18 @@ class OwncastClient:
         self.metrics = metrics
 
         # Set up HTTP session configuration
-        headers = {"User-Agent": user_agent(version)}
+        headers = {"User-Agent": _user_agent(version)}
         cookie_jar = aiohttp.DummyCookieJar()
         connector = aiohttp.TCPConnector(
             use_dns_cache=False,
-            limit=1000,
-            limit_per_host=1,
-            keepalive_timeout=120,
+            limit=_HTTP_CONNECTION_LIMIT,
+            limit_per_host=_HTTP_CONNECTION_LIMIT_PER_HOST,
+            keepalive_timeout=_HTTP_KEEPALIVE_TIMEOUT_SECONDS,
         )
-        timeout = aiohttp.ClientTimeout(sock_connect=5, sock_read=5)
+        timeout = aiohttp.ClientTimeout(
+            sock_connect=_HTTP_CONNECT_TIMEOUT_SECONDS,
+            sock_read=_HTTP_READ_TIMEOUT_SECONDS,
+        )
 
         self.session = aiohttp.ClientSession(
             headers=headers,
@@ -80,23 +120,48 @@ class OwncastClient:
             async with self.session.get(url, allow_redirects=False) as response:
                 if response.status != 200:
                     self.log.warning(
-                        f"[{domain}] Response to request on "
-                        f"{path} was not 200, "
-                        f"got {response.status} instead."
+                        "[%s] Response to request on %s was not 200, "
+                        "got %s instead.",
+                        domain,
+                        path,
+                        response.status,
                     )
                     return None
                 try:
-                    result: dict[str, Any] = await response.json()
+                    body = await _read_limited_response_body(response)
+                    if body is None:
+                        self.log.warning(
+                            "[%s] Rejecting response to request on %s as it "
+                            "was larger than %s bytes.",
+                            domain,
+                            path,
+                            _MAX_JSON_RESPONSE_BYTES,
+                        )
+                        return None
+
+                    result = json.loads(body)
+                    if not isinstance(result, dict):
+                        self.log.warning(
+                            "[%s] Rejecting response to request on %s as JSON "
+                            "was not an object.",
+                            domain,
+                            path,
+                        )
+                        return None
                     return result
-                except (ValueError, aiohttp.ContentTypeError) as e:
+                except ValueError as e:
                     self.log.warning(
-                        f"[{domain}] Rejecting response to request on "
-                        f"{path} as could not be "
-                        f"interpreted as JSON: {e}"
+                        "[%s] Rejecting response to request on %s as could not "
+                        "be interpreted as JSON: %s",
+                        domain,
+                        path,
+                        e,
                     )
                     return None
         except (aiohttp.ClientError, TimeoutError, OSError) as e:
-            self.log.warning(f"[{domain}] Error making GET request to {path}: {e}")
+            self.log.warning(
+                "[%s] Error making GET request to %s: %s", domain, path, e
+            )
             return None
 
     async def get_stream_state(self, domain: str) -> StreamState | None:
@@ -108,25 +173,27 @@ class OwncastClient:
         :param domain: The domain (not URL) where the stream is hosted.
         :return: A StreamState if available, None on error.
         """
-        self.log.debug(f"[{domain}] Fetching current stream state...")
+        self.log.debug("[%s] Fetching current stream state...", domain)
         with self.metrics.response_timer(domain) as timer:
-            new_state = await self._fetch_json(domain, OWNCAST_STATUS_PATH)
+            new_state = await self._fetch_json(domain, _OWNCAST_STATUS_PATH)
 
             if new_state is None:
                 return None
 
-            # Validate the response contains all basic info needed
-            missing = REQUIRED_STATUS_FIELDS - new_state.keys()
-            if missing:
+            try:
+                stream_state = StreamState.from_api_response(new_state, domain)
+            except InvalidApiResponseError as e:
                 self.log.warning(
-                    f"[{domain}] Rejecting response to request on "
-                    f"{OWNCAST_STATUS_PATH} as it is missing "
-                    f"fields: {', '.join(sorted(missing))}"
+                    "[%s] Rejecting response to request on %s as response "
+                    "shape is invalid: %s",
+                    domain,
+                    _OWNCAST_STATUS_PATH,
+                    e,
                 )
                 return None
 
             timer.success()
-            return StreamState.from_api_response(new_state, domain)
+            return stream_state
 
     async def get_stream_config(self, domain: str) -> StreamConfig | None:
         """Get the current stream config for a given domain.
@@ -137,14 +204,26 @@ class OwncastClient:
         :param domain: The domain (not URL) where the stream is hosted.
         :return: A StreamConfig, or None if fetch failed.
         """
-        self.log.debug(f"[{domain}] Fetching current stream config...")
+        self.log.debug("[%s] Fetching current stream config...", domain)
         with self.metrics.response_timer(domain) as timer:
-            config = await self._fetch_json(domain, OWNCAST_CONFIG_PATH)
+            config = await self._fetch_json(domain, _OWNCAST_CONFIG_PATH)
             if config is None:
                 return None
 
+            try:
+                stream_config = StreamConfig.from_api_response(config)
+            except InvalidApiResponseError as e:
+                self.log.warning(
+                    "[%s] Rejecting response to request on %s as response "
+                    "shape is invalid: %s",
+                    domain,
+                    _OWNCAST_CONFIG_PATH,
+                    e,
+                )
+                return None
+
             timer.success()
-            return StreamConfig.from_api_response(config)
+            return stream_config
 
     async def validate_instance(self, domain: str) -> bool:
         """Validate that a domain is a valid Owncast instance.

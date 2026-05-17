@@ -14,6 +14,7 @@
 
 """Tests for the notification service."""
 
+import asyncio
 import logging
 import time
 from typing import TYPE_CHECKING
@@ -21,12 +22,15 @@ from typing import TYPE_CHECKING
 import pytest
 
 from owncastsentry.metrics import MetricsService
-from owncastsentry.notification_service import NotificationService
-from owncastsentry.utils import SECONDS_BETWEEN_NOTIFICATIONS
+from owncastsentry.notification_service import (
+    _SECONDS_BETWEEN_NOTIFICATIONS,
+    NotificationService,
+    _sanitize_for_plain_text,
+)
 from tests.conftest import _StubMatrixClient, generate_metrics_output
 
 if TYPE_CHECKING:
-    from owncastsentry.database import StreamRepository, SubscriptionRepository
+    from owncastsentry.repository import StreamRepository, SubscriptionRepository
 
 
 def _make_service(
@@ -42,6 +46,27 @@ def _make_service(
         logger=logging.getLogger("test"),
         metrics=metrics or MetricsService(),
     )
+
+
+class TestSanitizeForPlainText:
+    """Plain text sanitization for notifications."""
+
+    @pytest.mark.parametrize(
+        ("input_text", "expected"),
+        [
+            pytest.param("hello world", "hello world", id="plain-text"),
+            pytest.param("line1\nline2", "line1 line2", id="newline-removed"),
+            pytest.param("line1\rline2", "line1 line2", id="carriage-return"),
+            pytest.param("line1\r\nline2", "line1 line2", id="crlf-removed"),
+            pytest.param(
+                "too   many   spaces", "too many spaces", id="spaces-collapsed"
+            ),
+            pytest.param("", "", id="empty-string"),
+        ],
+    )
+    def test_sanitizes(self, input_text: str, expected: str) -> None:
+        """Sanitize the text for safe plain-text rendering."""
+        assert _sanitize_for_plain_text(input_text) == expected
 
 
 class TestCanNotify:
@@ -75,7 +100,7 @@ class TestCanNotify:
         )
         # Subtract an extra second to ensure the cooldown has fully elapsed
         service.notification_timers_cache["example.com"] = (
-            time.monotonic() - SECONDS_BETWEEN_NOTIFICATIONS - 1
+            time.monotonic() - _SECONDS_BETWEEN_NOTIFICATIONS - 1
         )
         assert service._can_notify("example.com") is True
 
@@ -100,6 +125,35 @@ class TestGetLastNotificationTime:
         service = _make_service(
             client=_StubMatrixClient(), subscription_repo=subscription_repo
         )
+        assert service.get_last_notification_time("unknown.com") == 0
+
+
+class TestClearNotificationState:
+    """Notification cache cleanup for deleted domains."""
+
+    def test_clears_cached_notification_time(
+        self, subscription_repo: SubscriptionRepository
+    ) -> None:
+        """Remove cached notification state for a domain."""
+        service = _make_service(
+            client=_StubMatrixClient(), subscription_repo=subscription_repo
+        )
+        service.notification_timers_cache["example.com"] = 12345.0
+
+        service.clear_notification_state("example.com")
+
+        assert service.get_last_notification_time("example.com") == 0
+
+    def test_missing_domain_is_ignored(
+        self, subscription_repo: SubscriptionRepository
+    ) -> None:
+        """Ignore cleanup for a domain with no cached state."""
+        service = _make_service(
+            client=_StubMatrixClient(), subscription_repo=subscription_repo
+        )
+
+        service.clear_notification_state("unknown.com")
+
         assert service.get_last_notification_time("unknown.com") == 0
 
 
@@ -245,6 +299,74 @@ class TestNotifyStreamLive:
         )
         for msg in client.sent_messages:
             assert msg.content.body == expected_body
+
+    async def test_records_cooldown_after_success(
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Record a cooldown after at least one room receives a notification."""
+        client = _StubMatrixClient()
+        service = _make_service(client=client, subscription_repo=subscription_repo)
+
+        await stream_repo.create("example.com")
+        await subscription_repo.add("example.com", "!room:matrix.org")
+
+        before_send = time.monotonic()
+        await service.notify_stream_live("example.com", "Stream", "Title", [])
+
+        assert service.get_last_notification_time("example.com") >= before_send
+
+    async def test_no_cooldown_when_no_subscribed_rooms(
+        self, subscription_repo: SubscriptionRepository
+    ) -> None:
+        """Do not record a cooldown if no room receives the notification."""
+        client = _StubMatrixClient()
+        service = _make_service(client=client, subscription_repo=subscription_repo)
+
+        await service.notify_stream_live("example.com", "Stream", "Title", [])
+
+        assert len(client.sent_messages) == 0
+        assert service.get_last_notification_time("example.com") == 0
+
+    async def test_no_cooldown_when_all_deliveries_fail(
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Do not record a cooldown if every room delivery fails."""
+        client = _StubMatrixClient()
+        client.should_fail_for_rooms.add("!bad:matrix.org")
+        service = _make_service(client=client, subscription_repo=subscription_repo)
+
+        await stream_repo.create("example.com")
+        await subscription_repo.add("example.com", "!bad:matrix.org")
+
+        await service.notify_stream_live("example.com", "Stream", "Title", [])
+
+        assert len(client.sent_messages) == 0
+        assert service.get_last_notification_time("example.com") == 0
+
+    async def test_counts_cancelled_delivery_as_failure(
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Count a cancelled delivery result as a failure."""
+        client = _StubMatrixClient()
+
+        async def send_message(_room_id: str, _content: object) -> None:
+            raise asyncio.CancelledError
+
+        client.send_message = send_message
+        service = _make_service(client=client, subscription_repo=subscription_repo)
+
+        await stream_repo.create("example.com")
+        await subscription_repo.add("example.com", "!room:matrix.org")
+
+        await service.notify_stream_live("example.com", "Stream", "Title", [])
+
+        assert service.get_last_notification_time("example.com") == 0
 
     async def test_skips_when_rate_limited(
         self,

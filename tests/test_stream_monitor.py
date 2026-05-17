@@ -18,15 +18,21 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
+import pytest
+
 from owncastsentry.metrics import MetricsService
-from owncastsentry.models import StreamConfig, StreamState, StreamStatus
-from owncastsentry.notification_service import NotificationService
-from owncastsentry.stream_monitor import StreamMonitor
-from owncastsentry.utils import (
-    CLEANUP_DELETE_THRESHOLD,
-    CLEANUP_WARNING_THRESHOLD,
-    SECONDS_BETWEEN_NOTIFICATIONS,
+from owncastsentry.notification_service import (
+    _SECONDS_BETWEEN_NOTIFICATIONS,
+    NotificationService,
 )
+from owncastsentry.stream_monitor import (
+    _CLEANUP_DELETE_THRESHOLD,
+    _CLEANUP_WARNING_THRESHOLD,
+    _TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN,
+    StreamMonitor,
+    _should_query_stream,
+)
+from owncastsentry.types import StreamConfig, StreamState, StreamStatus
 from tests.conftest import (
     _StubMatrixClient,
     _StubOwncastClient,
@@ -34,7 +40,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from owncastsentry.database import StreamRepository, SubscriptionRepository
+    from owncastsentry.repository import StreamRepository, SubscriptionRepository
 
 
 def _make_monitor(
@@ -106,6 +112,37 @@ def _make_monitor_with_metrics(
         metrics=metrics,
     )
     return monitor, notification_service, metrics
+
+
+class TestShouldQueryStream:
+    """Progressive backoff logic for stream polling."""
+
+    @pytest.mark.parametrize(
+        ("counter", "expected"),
+        [
+            pytest.param(0, True, id="counter-0-always-query"),
+            pytest.param(1, True, id="counter-1-always-query"),
+            pytest.param(4, True, id="counter-4-always-query"),
+            pytest.param(5, False, id="counter-5-skip-odd"),
+            pytest.param(6, True, id="counter-6-query-even"),
+            pytest.param(9, False, id="counter-9-skip-odd"),
+            pytest.param(10, False, id="counter-10-skip-not-mod-3"),
+            pytest.param(12, True, id="counter-12-query-mod-3"),
+            pytest.param(14, False, id="counter-14-skip-not-mod-3"),
+            pytest.param(15, True, id="counter-15-query-mod-5"),
+            pytest.param(16, False, id="counter-16-skip-not-mod-5"),
+            pytest.param(20, True, id="counter-20-query-mod-5"),
+            pytest.param(29, False, id="counter-29-skip-not-mod-5"),
+            pytest.param(30, True, id="counter-30-query-mod-15"),
+            pytest.param(31, False, id="counter-31-skip-not-mod-15"),
+            pytest.param(45, True, id="counter-45-query-mod-15"),
+            pytest.param(100, False, id="counter-100-skip-not-mod-15"),
+            pytest.param(105, True, id="counter-105-query-mod-15"),
+        ],
+    )
+    def test_backoff_tiers(self, counter: int, expected: bool) -> None:
+        """Return the expected query decision for each backoff tier."""
+        assert _should_query_stream(counter) == expected
 
 
 class TestUpdateAllStreams:
@@ -252,7 +289,7 @@ class TestUpdateStreamGoesLive:
                 last_connect_time="2026-01-01T12:00:00Z",
                 last_disconnect_time="2026-01-01T10:00:00Z",
             ),
-            stream_config=StreamConfig(name="Live Stream", tags=["gaming"]),
+            stream_config=StreamConfig(name="Live Stream", tags=("gaming",)),
         )
         client = _StubMatrixClient()
         monitor, _ = _make_monitor(
@@ -271,7 +308,9 @@ class TestUpdateStreamGoesLive:
         )
 
         # Set offline timer to long ago so it's not a brief outage
-        monitor.offline_timer_cache["live.com"] = 0
+        monitor.offline_timer_cache["live.com"] = (
+            time.monotonic() - _TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN - 1
+        )
 
         result = await monitor.update_stream("live.com")
         assert result is True
@@ -315,7 +354,9 @@ class TestUpdateStreamGoesLive:
             last_disconnect_time="2026-01-01T10:00:00Z",
         )
 
-        monitor.offline_timer_cache["live.com"] = 0
+        monitor.offline_timer_cache["live.com"] = (
+            time.monotonic() - _TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN - 1
+        )
 
         result = await monitor.update_stream("live.com")
         assert result is True
@@ -447,10 +488,13 @@ class TestUpdateStreamTitleChange:
             last_connect_time="2026-01-01T12:00:00Z",
         )
 
-        monitor.offline_timer_cache["title.com"] = 0
+        now = time.monotonic()
+        monitor.offline_timer_cache["title.com"] = (
+            now - _SECONDS_BETWEEN_NOTIFICATIONS - 100
+        )
         # Subtract an extra second to ensure the cooldown has fully elapsed
         notification_service.notification_timers_cache["title.com"] = (
-            time.monotonic() - SECONDS_BETWEEN_NOTIFICATIONS - 1
+            now - _SECONDS_BETWEEN_NOTIFICATIONS - 1
         )
 
         result = await monitor.update_stream("title.com")
@@ -496,10 +540,13 @@ class TestUpdateStreamTitleChange:
 
         # Last notification was long enough ago to pass rate limiting,
         # but more recent than the offline timer (so title-change fires)
-        monitor.offline_timer_cache["title.com"] = 0
+        now = time.monotonic()
+        monitor.offline_timer_cache["title.com"] = (
+            now - _SECONDS_BETWEEN_NOTIFICATIONS - 100
+        )
         # Subtract an extra second to ensure the cooldown has fully elapsed
         notification_service.notification_timers_cache["title.com"] = (
-            time.monotonic() - SECONDS_BETWEEN_NOTIFICATIONS - 1
+            now - _SECONDS_BETWEEN_NOTIFICATIONS - 1
         )
 
         result = await monitor.update_stream("title.com")
@@ -546,10 +593,10 @@ class TestUpdateStreamTitleChange:
         # and both are old enough to pass rate limiting
         now = time.monotonic()
         monitor.offline_timer_cache["title.com"] = (
-            now - SECONDS_BETWEEN_NOTIFICATIONS - 100
+            now - _SECONDS_BETWEEN_NOTIFICATIONS - 100
         )
         notification_service.notification_timers_cache["title.com"] = (
-            now - SECONDS_BETWEEN_NOTIFICATIONS - 200
+            now - _SECONDS_BETWEEN_NOTIFICATIONS - 200
         )
 
         result = await monitor.update_stream("title.com")
@@ -659,7 +706,7 @@ class TestCheckCleanupThresholds:
 
         await _seed_stream(stream_repo, subscription_repo, domain="warn.com")
 
-        await monitor._check_cleanup_thresholds("warn.com", CLEANUP_WARNING_THRESHOLD)
+        await monitor._check_cleanup_thresholds("warn.com", _CLEANUP_WARNING_THRESHOLD)
 
         assert len(client.sent_messages) == 1
         assert client.sent_messages[0].content.body == (
@@ -680,7 +727,7 @@ class TestCheckCleanupThresholds:
         """Delete all subscriptions and the stream record at the 90-day threshold."""
         owncast = _StubOwncastClient()
         client = _StubMatrixClient()
-        monitor, _ = _make_monitor(
+        monitor, notification_service = _make_monitor(
             owncast_client=owncast,
             stream_repo=stream_repo,
             subscription_repo=subscription_repo,
@@ -688,8 +735,10 @@ class TestCheckCleanupThresholds:
         )
 
         await _seed_stream(stream_repo, subscription_repo, domain="delete.com")
+        monitor.offline_timer_cache["delete.com"] = time.monotonic()
+        notification_service.notification_timers_cache["delete.com"] = time.monotonic()
 
-        await monitor._check_cleanup_thresholds("delete.com", CLEANUP_DELETE_THRESHOLD)
+        await monitor._check_cleanup_thresholds("delete.com", _CLEANUP_DELETE_THRESHOLD)
 
         # Deletion notification sent
         assert len(client.sent_messages) == 1
@@ -709,6 +758,8 @@ class TestCheckCleanupThresholds:
         assert await stream_repo.get_by_domain("delete.com") is None
         rooms = await subscription_repo.get_subscribed_rooms("delete.com")
         assert rooms == []
+        assert "delete.com" not in monitor.offline_timer_cache
+        assert notification_service.get_last_notification_time("delete.com") == 0
 
     async def test_no_action_below_thresholds(
         self,
@@ -1061,7 +1112,34 @@ class TestStreamMonitorMetrics:
         metrics.set_stream_status("delete.com", StreamStatus.OFFLINE)
         assert 'domain="delete.com"' in generate_metrics_output(metrics)
 
-        await monitor._check_cleanup_thresholds("delete.com", CLEANUP_DELETE_THRESHOLD)
+        await monitor._check_cleanup_thresholds("delete.com", _CLEANUP_DELETE_THRESHOLD)
+        assert 'domain="delete.com"' not in generate_metrics_output(metrics)
+
+    async def test_update_stream_does_not_recreate_metrics_after_cleanup(
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Do not recreate per-domain metrics after update_stream deletes a stream."""
+        owncast = _StubOwncastClient(stream_state=None)
+        client = _StubMatrixClient()
+        monitor, _, metrics = _make_monitor_with_metrics(
+            owncast_client=owncast,
+            stream_repo=stream_repo,
+            subscription_repo=subscription_repo,
+            client=client,
+        )
+        await _seed_stream(stream_repo, subscription_repo, domain="delete.com")
+        metrics.set_stream_status("delete.com", StreamStatus.OFFLINE)
+        metrics.set_check_failures("delete.com", _CLEANUP_DELETE_THRESHOLD - 1)
+
+        for _ in range(_CLEANUP_DELETE_THRESHOLD - 1):
+            await stream_repo.increment_failure_counter("delete.com")
+
+        await monitor.update_stream("delete.com")
+
+        assert await stream_repo.get_by_domain("delete.com") is None
+        assert await subscription_repo.get_subscribed_rooms("delete.com") == []
         assert 'domain="delete.com"' not in generate_metrics_output(metrics)
 
     async def test_records_subscription_counts(

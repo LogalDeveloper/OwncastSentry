@@ -21,18 +21,27 @@ from typing import TYPE_CHECKING, Any
 from mautrix.types import MessageType, TextMessageEventContent
 
 from .metrics import NotificationType
-from .utils import (
-    CLEANUP_DELETE_DAYS,
-    CLEANUP_WARNING_DAYS,
-    SECONDS_BETWEEN_NOTIFICATIONS,
-    sanitize_for_plain_text,
-)
 
 if TYPE_CHECKING:
     import logging
+    from collections.abc import Sequence
 
-    from .database import SubscriptionRepository
     from .metrics import MetricsService
+    from .repository import SubscriptionRepository
+
+
+_SECONDS_BETWEEN_NOTIFICATIONS = 20 * 60
+
+_CLEANUP_WARNING_DAYS = 83
+_CLEANUP_DELETE_DAYS = 90
+
+
+def _sanitize_for_plain_text(text: str) -> str:
+    """Sanitize text for plain text rendering."""
+    if not text:
+        return text
+
+    return " ".join(text.split())
 
 
 class NotificationService:
@@ -65,7 +74,7 @@ class NotificationService:
         domain: str,
         name: str,
         title: str,
-        tags: list[str],
+        tags: Sequence[str],
         *,
         title_change: bool = False,
     ) -> None:
@@ -83,15 +92,13 @@ class NotificationService:
                 time.monotonic() - self.notification_timers_cache[domain]
             )
             self.log.info(
-                f"[{domain}] Not sending notifications. Only "
-                f"{seconds_since_last} of required "
-                f"{SECONDS_BETWEEN_NOTIFICATIONS} seconds have "
-                f"passed since last notification."
+                "[%s] Not sending notifications. Only %s of required "
+                "%s seconds have passed since last notification.",
+                domain,
+                seconds_since_last,
+                _SECONDS_BETWEEN_NOTIFICATIONS,
             )
             return
-
-        # Record that we're sending a notification now
-        self._record_notification(domain)
 
         # Build the notification message
         body_text = self._format_message(name, title, domain, tags, title_change)
@@ -99,12 +106,18 @@ class NotificationService:
         # Send notifications to all subscribed rooms in parallel
         successful, failed = await self._broadcast_to_rooms(domain, body_text)
 
+        # Record that a notification was sent if at least one room received it.
+        if successful > 0:
+            self._record_notification(domain)
+
         # Log completion
         notification_type = "title change" if title_change else "going live"
         self.log.info(
-            f"[{domain}] Completed sending {notification_type} "
-            f"notifications! {successful} succeeded, "
-            f"{failed} failed."
+            "[%s] Completed sending %s notifications! %s succeeded, %s failed.",
+            domain,
+            notification_type,
+            successful,
+            failed,
         )
 
         self.metrics.record_delivery(
@@ -112,6 +125,75 @@ class NotificationService:
             successful=successful,
             failed=failed,
         )
+
+    async def send_cleanup_warning(self, domain: str) -> None:
+        """Send cleanup warning notification to all subscribed rooms.
+
+        :param domain: The stream domain.
+        """
+        remaining_days = _CLEANUP_DELETE_DAYS - _CLEANUP_WARNING_DAYS
+        body_text = (
+            "⚠️  Warning: Subscription Cleanup Scheduled\n\n"
+            f"The Owncast instance at {domain} has been "
+            f"unreachable for {_CLEANUP_WARNING_DAYS} days. If it remains "
+            f"unreachable for {remaining_days} more days "
+            f"({_CLEANUP_DELETE_DAYS} days total), this subscription "
+            f"will be automatically removed."
+        )
+
+        successful, failed = await self._broadcast_to_rooms(domain, body_text)
+        self.log.info(
+            "[%s] Sent cleanup warning to %s rooms (%s failed).",
+            domain,
+            successful,
+            failed,
+        )
+
+        self.metrics.record_delivery(
+            NotificationType.CLEANUP_WARNING, successful=successful, failed=failed
+        )
+
+    async def send_cleanup_deletion(self, domain: str) -> None:
+        """Send cleanup deletion notification to all subscribed rooms.
+
+        :param domain: The stream domain.
+        """
+        body_text = (
+            "🗑️  Subscription Automatically Removed\n\n"
+            f"The Owncast instance at {domain} has been "
+            f"unreachable for {_CLEANUP_DELETE_DAYS} days and has been "
+            f"automatically removed from subscriptions in this "
+            f"room.\n\n"
+            f"If the instance comes online again and you want to "
+            f"resubscribe, run `!subscribe {domain}`."
+        )
+
+        successful, failed = await self._broadcast_to_rooms(domain, body_text)
+        self.log.info(
+            "[%s] Sent cleanup deletion notice to %s rooms (%s failed).",
+            domain,
+            successful,
+            failed,
+        )
+
+        self.metrics.record_delivery(
+            NotificationType.CLEANUP_DELETION, successful=successful, failed=failed
+        )
+
+    def get_last_notification_time(self, domain: str) -> float:
+        """Get the timestamp of the last notification sent for a domain.
+
+        :param domain: The stream domain.
+        :return: Unix timestamp of last notification, or 0 if never notified.
+        """
+        return self.notification_timers_cache.get(domain, 0)
+
+    def clear_notification_state(self, domain: str) -> None:
+        """Clear cached notification state for a deleted domain.
+
+        :param domain: The stream domain to remove from local caches.
+        """
+        self.notification_timers_cache.pop(domain, None)
 
     async def _send_notification(
         self, room_id: str, body_text: str, domain: str
@@ -128,13 +210,20 @@ class NotificationService:
             await self.client.send_message(room_id, content)
         except Exception as exception:
             self.log.warning(
-                f"[{domain}] Failed to send notification "
-                f"message to room [{room_id}]: {exception}"
+                "[%s] Failed to send notification message to room [%s]: %s",
+                domain,
+                room_id,
+                exception,
             )
             raise
 
     def _format_message(
-        self, name: str, title: str, domain: str, tags: list[str], title_change: bool
+        self,
+        name: str,
+        title: str,
+        domain: str,
+        tags: Sequence[str],
+        title_change: bool,
     ) -> str:
         """Format the notification message body.
 
@@ -147,7 +236,7 @@ class NotificationService:
         """
         # Use name if available, fallback to domain
         stream_name = name or domain
-        safe_stream_name = sanitize_for_plain_text(stream_name)
+        safe_stream_name = _sanitize_for_plain_text(stream_name)
 
         # Choose message based on notification type
         if title_change:
@@ -157,7 +246,7 @@ class NotificationService:
 
         # Add title if present
         if title:
-            safe_title = sanitize_for_plain_text(title)
+            safe_title = _sanitize_for_plain_text(title)
             parts.append(f"\nStream Title: {safe_title}")
 
         # Add stream URL
@@ -165,25 +254,17 @@ class NotificationService:
 
         # Add tags if present
         if tags:
-            safe_tags = [
-                safe_tag
+            tag_text = " ".join(
+                f"#{safe_tag}"
                 for tag in tags
-                if (safe_tag := sanitize_for_plain_text(tag))
+                if (safe_tag := _sanitize_for_plain_text(tag))
                 and not safe_tag.startswith(".")
-            ]
+            )
 
-            if safe_tags:
-                parts.append(f"\n\n{' '.join(f'#{tag}' for tag in safe_tags)}")
+            if tag_text:
+                parts.append(f"\n\n{tag_text}")
 
         return "".join(parts)
-
-    def get_last_notification_time(self, domain: str) -> float:
-        """Get the timestamp of the last notification sent for a domain.
-
-        :param domain: The stream domain.
-        :return: Unix timestamp of last notification, or 0 if never notified.
-        """
-        return self.notification_timers_cache.get(domain, 0)
 
     def _can_notify(self, domain: str) -> bool:
         """Check if enough time has passed to send another notification.
@@ -191,13 +272,12 @@ class NotificationService:
         :param domain: The stream domain.
         :return: True if notification can be sent, False otherwise.
         """
-        if domain not in self.notification_timers_cache:
-            return True
-
-        seconds_since_last = round(
-            time.monotonic() - self.notification_timers_cache[domain]
+        last_notification_time = self.notification_timers_cache.get(domain)
+        return (
+            last_notification_time is None
+            or time.monotonic() - last_notification_time
+            >= _SECONDS_BETWEEN_NOTIFICATIONS
         )
-        return seconds_since_last >= SECONDS_BETWEEN_NOTIFICATIONS
 
     def _record_notification(self, domain: str) -> None:
         """Record that a notification was sent at the current time.
@@ -218,55 +298,6 @@ class NotificationService:
             self._send_notification(room_id, body_text, domain) for room_id in room_ids
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        failed = sum(1 for r in results if isinstance(r, Exception))
+        failed = sum(1 for r in results if isinstance(r, BaseException))
         successful = len(results) - failed
         return successful, failed
-
-    async def send_cleanup_warning(self, domain: str) -> None:
-        """Send cleanup warning notification to all subscribed rooms.
-
-        :param domain: The stream domain.
-        """
-        remaining_days = CLEANUP_DELETE_DAYS - CLEANUP_WARNING_DAYS
-        body_text = (
-            "⚠️  Warning: Subscription Cleanup Scheduled\n\n"
-            f"The Owncast instance at {domain} has been "
-            f"unreachable for {CLEANUP_WARNING_DAYS} days. If it remains "
-            f"unreachable for {remaining_days} more days "
-            f"({CLEANUP_DELETE_DAYS} days total), this subscription "
-            f"will be automatically removed."
-        )
-
-        successful, failed = await self._broadcast_to_rooms(domain, body_text)
-        self.log.info(
-            f"[{domain}] Sent cleanup warning to {successful} rooms ({failed} failed)."
-        )
-
-        self.metrics.record_delivery(
-            NotificationType.CLEANUP_WARNING, successful=successful, failed=failed
-        )
-
-    async def send_cleanup_deletion(self, domain: str) -> None:
-        """Send cleanup deletion notification to all subscribed rooms.
-
-        :param domain: The stream domain.
-        """
-        body_text = (
-            "🗑️  Subscription Automatically Removed\n\n"
-            f"The Owncast instance at {domain} has been "
-            f"unreachable for {CLEANUP_DELETE_DAYS} days and has been "
-            f"automatically removed from subscriptions in this "
-            f"room.\n\n"
-            f"If the instance comes online again and you want to "
-            f"resubscribe, run `!subscribe {domain}`."
-        )
-
-        successful, failed = await self._broadcast_to_rooms(domain, body_text)
-        self.log.info(
-            f"[{domain}] Sent cleanup deletion notice to "
-            f"{successful} rooms ({failed} failed)."
-        )
-
-        self.metrics.record_delivery(
-            NotificationType.CLEANUP_DELETION, successful=successful, failed=failed
-        )

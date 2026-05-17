@@ -15,28 +15,57 @@
 """Tests for bot command handlers."""
 
 import json
-import logging
 from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock
 
 import pytest
 import time_machine
 from aioresponses import aioresponses
 
-from owncastsentry.commands import CommandHandler
-from owncastsentry.models import StreamState
-from owncastsentry.utils import OWNCAST_STATUS_PATH, UNKNOWN_STATUS_THRESHOLD
+from owncastsentry.commands import (
+    _escape_markdown,
+    _format_duration,
+    _sanitize_for_markdown,
+)
+from owncastsentry.owncast_client import _OWNCAST_STATUS_PATH
+from owncastsentry.types import UNKNOWN_STATUS_THRESHOLD, StreamState
 from tests.conftest import VALID_STATUS_RESPONSE
 
 
-def _make_command_handler() -> CommandHandler:
-    """Build a CommandHandler with dummy dependencies for pure logic tests."""
-    return CommandHandler(
-        owncast_client=MagicMock(),
-        stream_repo=MagicMock(),
-        subscription_repo=MagicMock(),
-        logger=logging.getLogger("test"),
+class TestEscapeMarkdown:
+    """Markdown special character escaping."""
+
+    @pytest.mark.parametrize(
+        ("input_text", "expected"),
+        [
+            pytest.param("hello", "hello", id="plain-text-unchanged"),
+            pytest.param("*bold*", "\\*bold\\*", id="asterisks"),
+            pytest.param("_italic_", "\\_italic\\_", id="underscores"),
+            pytest.param("[link](url)", "\\[link\\]\\(url\\)", id="link-syntax"),
+            pytest.param("`code`", "\\`code\\`", id="backticks"),
+            pytest.param("# heading", "\\# heading", id="heading"),
+            pytest.param("> quote", "\\> quote", id="blockquote"),
+            pytest.param("<html>", "\\<html\\>", id="angle-brackets"),
+            pytest.param("a & b", "a \\& b", id="ampersand"),
+            pytest.param("a\\b", "a\\\\b", id="backslash"),
+            pytest.param("", "", id="empty-string"),
+        ],
     )
+    def test_escapes_special_chars(self, input_text: str, expected: str) -> None:
+        """Escape the given Markdown special character."""
+        assert _escape_markdown(input_text) == expected
+
+
+class TestSanitizeForMarkdown:
+    """Markdown sanitization combining newline removal and escaping."""
+
+    def test_removes_newlines_and_escapes(self) -> None:
+        """Remove newlines and escape Markdown special characters."""
+        result = _sanitize_for_markdown("*bold*\nnew line")
+        assert result == "\\*bold\\* new line"
+
+    def test_empty_string(self) -> None:
+        """Return empty string unchanged."""
+        assert _sanitize_for_markdown("") == ""
 
 
 class TestFormatDuration:
@@ -57,18 +86,24 @@ class TestFormatDuration:
             pytest.param(172800, "2 days", id="plural-days"),
         ],
     )
-    @time_machine.travel(_NOW)
     def test_formats_duration(self, seconds_ago: int, expected: str) -> None:
         """Format a timestamp into a human-readable duration."""
-        handler = _make_command_handler()
         timestamp = (self._NOW - timedelta(seconds=seconds_ago)).isoformat()
-        result = handler._format_duration(timestamp)
+        result = _format_duration(timestamp, self._NOW)
         assert result == expected
 
     def test_invalid_timestamp(self) -> None:
         """Return 'unknown duration' for unparsable timestamps."""
-        handler = _make_command_handler()
-        assert handler._format_duration("not-a-timestamp") == "unknown duration"
+        assert _format_duration("not-a-timestamp", self._NOW) == "unknown duration"
+
+    def test_naive_timestamp(self) -> None:
+        """Return 'unknown duration' for timestamps without timezone information."""
+        assert _format_duration("2026-03-13T11:59:00", self._NOW) == "unknown duration"
+
+    def test_future_timestamp(self) -> None:
+        """Return 'unknown duration' for timestamps in the future."""
+        timestamp = (self._NOW + timedelta(seconds=1)).isoformat()
+        assert _format_duration(timestamp, self._NOW) == "unknown duration"
 
 
 class TestSubscribeCommand:
@@ -76,7 +111,7 @@ class TestSubscribeCommand:
 
     async def test_subscribe_valid_stream(self, maubot_test_bot, maubot_plugin) -> None:
         """Subscribe to a valid Owncast stream."""
-        status_url = f"https://stream.logal.dev{OWNCAST_STATUS_PATH}"
+        status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
         with aioresponses() as mocked:
             mocked.get(
                 status_url,
@@ -94,7 +129,7 @@ class TestSubscribeCommand:
         self, maubot_test_bot, maubot_plugin
     ) -> None:
         """Reject subscription to an invalid Owncast instance."""
-        status_url = f"https://invalid.com{OWNCAST_STATUS_PATH}"
+        status_url = f"https://invalid.com{_OWNCAST_STATUS_PATH}"
         with aioresponses() as mocked:
             mocked.get(status_url, status=404)
             await maubot_test_bot.send("!subscribe invalid.com")
@@ -111,7 +146,7 @@ class TestSubscribeCommand:
         self, maubot_test_bot, maubot_plugin
     ) -> None:
         """Reject duplicate subscription in the same room."""
-        status_url = f"https://stream.logal.dev{OWNCAST_STATUS_PATH}"
+        status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
         with aioresponses() as mocked:
             mocked.get(
                 status_url,
@@ -131,7 +166,7 @@ class TestSubscribeCommand:
         self, maubot_test_bot, maubot_plugin
     ) -> None:
         """Skip instance validation when subscribing from a new room."""
-        status_url = f"https://stream.logal.dev{OWNCAST_STATUS_PATH}"
+        status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
         with aioresponses() as mocked:
             mocked.get(
                 status_url,
@@ -159,7 +194,7 @@ class TestUnsubscribeCommand:
 
     async def test_unsubscribe_existing(self, maubot_test_bot, maubot_plugin) -> None:
         """Unsubscribe from a subscribed stream."""
-        status_url = f"https://stream.logal.dev{OWNCAST_STATUS_PATH}"
+        status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
         with aioresponses() as mocked:
             mocked.get(
                 status_url,
@@ -205,7 +240,7 @@ class TestSubscriptionsCommand:
     async def test_shows_online_stream(self, maubot_test_bot, maubot_plugin) -> None:
         """Show stream details including title and duration."""
         # Subscribe first
-        status_url = f"https://stream.logal.dev{OWNCAST_STATUS_PATH}"
+        status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
         with aioresponses() as mocked:
             mocked.get(
                 status_url,
@@ -237,10 +272,45 @@ class TestSubscriptionsCommand:
         )
 
     @time_machine.travel(datetime(2026, 3, 13, 12, 0, 0, tzinfo=UTC))
+    async def test_escapes_markdown_in_stream_name_and_title(
+        self, maubot_test_bot, maubot_plugin
+    ) -> None:
+        """Render stream name and title as literal text in command output."""
+        status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
+        with aioresponses() as mocked:
+            mocked.get(
+                status_url,
+                body=json.dumps(VALID_STATUS_RESPONSE).encode(),
+            )
+            await maubot_test_bot.send("!subscribe stream.logal.dev")
+
+        await maubot_plugin.stream_repo.update(
+            StreamState(
+                domain="stream.logal.dev",
+                name="*Bold* [link](https://evil.example)\nName",
+                title="`code` > quote #tag",
+                last_connect_time="2026-01-01T12:00:00Z",
+            )
+        )
+
+        await maubot_test_bot.send("!subscriptions")
+
+        content = maubot_test_bot.responded[1].content
+        assert "● ***Bold* [link](https://evil.example) Name**" in content.body
+        assert "  ○ Title: `code` > quote #tag" in content.body
+        assert content.formatted_body is not None
+        assert '<a href="https://evil.example">' not in content.formatted_body
+        assert (
+            "<strong>*Bold* [link](https://evil.example) Name</strong>"
+            in content.formatted_body
+        )
+        assert "Title: `code` &gt; quote #tag" in content.formatted_body
+
+    @time_machine.travel(datetime(2026, 3, 13, 12, 0, 0, tzinfo=UTC))
     async def test_shows_offline_stream(self, maubot_test_bot, maubot_plugin) -> None:
         """Show offline status for non-live streams."""
         # Subscribe first
-        status_url = f"https://stream.logal.dev{OWNCAST_STATUS_PATH}"
+        status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
         with aioresponses() as mocked:
             mocked.get(
                 status_url,
@@ -273,7 +343,7 @@ class TestSubscriptionsCommand:
         self, maubot_test_bot, maubot_plugin
     ) -> None:
         """Show offline status without duration before first poll completes."""
-        status_url = f"https://stream.logal.dev{OWNCAST_STATUS_PATH}"
+        status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
         with aioresponses() as mocked:
             mocked.get(
                 status_url,
@@ -296,7 +366,7 @@ class TestSubscriptionsCommand:
 
     async def test_shows_unknown_stream(self, maubot_test_bot, maubot_plugin) -> None:
         """Show unknown status when instance has been unreachable."""
-        status_url = f"https://stream.logal.dev{OWNCAST_STATUS_PATH}"
+        status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
         with aioresponses() as mocked:
             mocked.get(
                 status_url,
@@ -330,11 +400,11 @@ class TestSubscriptionsCommand:
         # Subscribe in reverse alphabetical order to verify sorted output
         with aioresponses() as mocked:
             mocked.get(
-                f"https://beta.com{OWNCAST_STATUS_PATH}",
+                f"https://beta.com{_OWNCAST_STATUS_PATH}",
                 body=json.dumps(VALID_STATUS_RESPONSE).encode(),
             )
             mocked.get(
-                f"https://alpha.com{OWNCAST_STATUS_PATH}",
+                f"https://alpha.com{_OWNCAST_STATUS_PATH}",
                 body=json.dumps(VALID_STATUS_RESPONSE).encode(),
             )
             await maubot_test_bot.send("!subscribe beta.com")
@@ -393,7 +463,7 @@ class TestLiveCommand:
     async def test_no_live_streams(self, maubot_test_bot, maubot_plugin) -> None:
         """Show 'no live' message when all streams are offline."""
         # Subscribe first
-        status_url = f"https://stream.logal.dev{OWNCAST_STATUS_PATH}"
+        status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
         with aioresponses() as mocked:
             mocked.get(
                 status_url,
@@ -423,7 +493,7 @@ class TestLiveCommand:
     async def test_shows_live_stream(self, maubot_test_bot, maubot_plugin) -> None:
         """Show live stream with title and duration."""
         # Subscribe first
-        status_url = f"https://stream.logal.dev{OWNCAST_STATUS_PATH}"
+        status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
         with aioresponses() as mocked:
             mocked.get(
                 status_url,
@@ -460,11 +530,11 @@ class TestLiveCommand:
         # Subscribe in reverse alphabetical order to verify sorted output
         with aioresponses() as mocked:
             mocked.get(
-                f"https://beta.com{OWNCAST_STATUS_PATH}",
+                f"https://beta.com{_OWNCAST_STATUS_PATH}",
                 body=json.dumps(VALID_STATUS_RESPONSE).encode(),
             )
             mocked.get(
-                f"https://alpha.com{OWNCAST_STATUS_PATH}",
+                f"https://alpha.com{_OWNCAST_STATUS_PATH}",
                 body=json.dumps(VALID_STATUS_RESPONSE).encode(),
             )
             await maubot_test_bot.send("!subscribe beta.com")

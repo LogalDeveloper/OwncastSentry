@@ -17,7 +17,7 @@
 import pytest
 
 from owncastsentry.metrics import ErrorSource, MetricsService, NotificationType
-from owncastsentry.models import StreamStatus
+from owncastsentry.types import StreamStatus
 from tests.conftest import generate_metrics_output
 
 

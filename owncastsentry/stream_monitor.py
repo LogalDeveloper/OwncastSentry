@@ -18,21 +18,34 @@ import asyncio
 import time
 from typing import TYPE_CHECKING
 
-from .models import StreamState, StreamStatus, UpdateResult
-from .utils import (
-    CLEANUP_DELETE_THRESHOLD,
-    CLEANUP_WARNING_THRESHOLD,
-    TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN,
-    should_query_stream,
-)
+from .types import StreamState, StreamStatus, UpdateResult
 
 if TYPE_CHECKING:
     import logging
 
-    from .database import StreamRepository, SubscriptionRepository
     from .metrics import MetricsService
     from .notification_service import NotificationService
     from .owncast_client import OwncastClient
+    from .repository import StreamRepository, SubscriptionRepository
+
+
+_TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN = 7 * 60
+
+_CLEANUP_WARNING_THRESHOLD = 83 * 24 * 60
+_CLEANUP_DELETE_THRESHOLD = 90 * 24 * 60
+
+
+def _should_query_stream(failure_counter: int) -> bool:
+    """Determine if a stream should be queried based on failure count."""
+    if failure_counter <= 4:
+        return True
+    if failure_counter <= 9:
+        return failure_counter % 2 == 0
+    if failure_counter <= 14:
+        return failure_counter % 3 == 0
+    if failure_counter <= 29:
+        return failure_counter % 5 == 0
+    return failure_counter % 15 == 0
 
 
 class StreamMonitor:
@@ -92,7 +105,8 @@ class StreamMonitor:
         for domain, result in zip(subscribed_domains, results, strict=True):
             if isinstance(result, BaseException):
                 self.log.exception(
-                    f"[{domain}] Unhandled exception during stream update.",
+                    "[%s] Unhandled exception during stream update.",
+                    domain,
                     exc_info=result,
                 )
                 failed_checks += 1
@@ -102,13 +116,19 @@ class StreamMonitor:
                 failed_checks += 1
 
         self.log.debug(
-            f"Update complete. {successful_checks}/{total_streams} succeeded, "
-            f"{failed_checks} failed."
+            "Update complete. %s/%s succeeded, %s failed.",
+            successful_checks,
+            total_streams,
+            failed_checks,
         )
 
+        subscription_counts = await self.subscription_repo.count_by_domains(
+            subscribed_domains
+        )
         for domain in subscribed_domains:
-            count = await self.subscription_repo.count_by_domain(domain)
-            self.metrics.set_subscription_count(domain, count)
+            self.metrics.set_subscription_count(
+                domain, subscription_counts.get(domain, 0)
+            )
 
         return UpdateResult(
             total_streams=total_streams,
@@ -134,19 +154,20 @@ class StreamMonitor:
             return True
 
         # Check if we should query this stream based on backoff schedule
-        if not should_query_stream(failure_counter):
+        if not _should_query_stream(failure_counter):
             # Skip this cycle, increment counter to track time passage
             await self.stream_repo.increment_failure_counter(domain)
             self.log.debug(
-                f"[{domain}] Skipping query due to backoff "
-                f"(counter={failure_counter + 1})"
+                "[%s] Skipping query due to backoff (counter=%s)",
+                domain,
+                failure_counter + 1,
             )
             # Check cleanup thresholds even when skipping query
             await self._check_cleanup_thresholds(domain, failure_counter + 1)
             updated_state = await self.stream_repo.get_by_domain(domain)
             if updated_state is not None:
                 self.metrics.set_stream_status(domain, updated_state.status)
-            self.metrics.set_check_failures(domain, failure_counter + 1)
+                self.metrics.set_check_failures(domain, failure_counter + 1)
             # Backoff is expected behavior, not a failure
             return True
 
@@ -168,14 +189,16 @@ class StreamMonitor:
         if new_state is None:
             await self.stream_repo.increment_failure_counter(domain)
             self.log.warning(
-                f"[{domain}] Connection failure (counter={failure_counter + 1})"
+                "[%s] Connection failure (counter=%s)",
+                domain,
+                failure_counter + 1,
             )
             # Check cleanup thresholds after connection failure
             await self._check_cleanup_thresholds(domain, failure_counter + 1)
             updated_state = await self.stream_repo.get_by_domain(domain)
             if updated_state is not None:
                 self.metrics.set_stream_status(domain, updated_state.status)
-            self.metrics.set_check_failures(domain, failure_counter + 1)
+                self.metrics.set_check_failures(domain, failure_counter + 1)
             # Actual connection failure
             return False
 
@@ -204,7 +227,7 @@ class StreamMonitor:
             update_database = True
             stream_config = await self.owncast_client.get_stream_config(domain)
 
-            self.log.info(f"[{domain}] Stream is now live!")
+            self.log.info("[%s] Stream is now live!", domain)
 
             # Calculate seconds since the stream last went offline
             seconds_since_last_offline = round(
@@ -215,10 +238,13 @@ class StreamMonitor:
             if not first_update:
                 # Use fallback values if config fetch failed
                 stream_name = stream_config.name if stream_config else domain
-                stream_tags = stream_config.tags if stream_config else []
+                stream_tags = stream_config.tags if stream_config else ()
 
                 # Has this stream been offline for a short time?
-                if seconds_since_last_offline < TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN:
+                if (
+                    seconds_since_last_offline
+                    < _TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN
+                ):
                     # Did the stream title change?
                     if old_state.title != new_state.title:
                         # Stream was briefly down; send title
@@ -233,13 +259,12 @@ class StreamMonitor:
                     else:
                         # Briefly offline, no title change. Skip.
                         self.log.info(
-                            f"[{domain}] Not sending "
-                            f"notifications. Stream was only "
-                            f"offline for "
-                            f"{seconds_since_last_offline} of "
-                            f"{TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN}"
-                            f" seconds and did not change its "
-                            f"title."
+                            "[%s] Not sending notifications. Stream was only "
+                            "offline for %s of %s seconds and did not change "
+                            "its title.",
+                            domain,
+                            seconds_since_last_offline,
+                            _TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN,
                         )
                 else:
                     # Offline for a while. Send a normal notification.
@@ -253,9 +278,9 @@ class StreamMonitor:
             else:
                 # No, this is the first time we're querying
                 self.log.info(
-                    f"[{domain}] Not sending notifications. "
-                    f"This is the first state update for "
-                    f"this stream."
+                    "[%s] Not sending notifications. This is the first state "
+                    "update for this stream.",
+                    domain,
                 )
 
         if (
@@ -264,13 +289,13 @@ class StreamMonitor:
         ):
             # Did the stream title change mid-session?
             if old_state.title != new_state.title:
-                self.log.info(f"[{domain}] Stream title was changed!")
+                self.log.info("[%s] Stream title was changed!", domain)
                 update_database = True
                 stream_config = await self.owncast_client.get_stream_config(domain)
 
                 # Use fallback values if config fetch failed
                 stream_name = stream_config.name if stream_config else domain
-                stream_tags = stream_config.tags if stream_config else []
+                stream_tags = stream_config.tags if stream_config else ()
 
                 # Was the last notification sent before the stream
                 # last went offline? If so, send a regular go-live
@@ -303,7 +328,7 @@ class StreamMonitor:
             # Yep. This stream is now offline. Log it.
             update_database = True
             self.offline_timer_cache[domain] = time.monotonic()
-            self.log.info(f"[{domain}] Stream is now offline.")
+            self.log.info("[%s] Stream is now offline.", domain)
 
         # Update the database with current stream state, if needed.
         if update_database:
@@ -314,7 +339,7 @@ class StreamMonitor:
             # Use fallback value if config fetch failed
             stream_name = stream_config.name if stream_config else ""
 
-            self.log.debug(f"[{domain}] Updating stream state in database...")
+            self.log.debug("[%s] Updating stream state in database...", domain)
 
             # Create updated state object (title already truncated in new_state)
             updated_state = StreamState(
@@ -328,7 +353,7 @@ class StreamMonitor:
             await self.stream_repo.update(updated_state)
 
         # All done.
-        self.log.debug(f"[{domain}] State update completed.")
+        self.log.debug("[%s] State update completed.", domain)
         if new_state.last_connect_time is not None:
             self.metrics.set_stream_status(domain, StreamStatus.ONLINE)
         else:
@@ -342,17 +367,19 @@ class StreamMonitor:
         :param counter: The current failure counter value.
         """
         # Check for 83-day warning threshold
-        if counter == CLEANUP_WARNING_THRESHOLD:
+        if counter == _CLEANUP_WARNING_THRESHOLD:
             self.log.warning(
-                f"[{domain}] Reached 83-day warning threshold. Sending cleanup warning."
+                "[%s] Reached 83-day warning threshold. Sending cleanup warning.",
+                domain,
             )
             await self.notification_service.send_cleanup_warning(domain)
 
         # Check for 90-day deletion threshold
-        if counter >= CLEANUP_DELETE_THRESHOLD:
+        if counter >= _CLEANUP_DELETE_THRESHOLD:
             self.log.warning(
-                f"[{domain}] Reached 90-day deletion threshold."
-                f" Removing all subscriptions."
+                "[%s] Reached 90-day deletion threshold. "
+                "Removing all subscriptions.",
+                domain,
             )
             # Send deletion notification
             await self.notification_service.send_cleanup_deletion(domain)
@@ -362,10 +389,13 @@ class StreamMonitor:
 
             # Delete the stream record
             await self.stream_repo.delete(domain)
+            self.offline_timer_cache.pop(domain, None)
+            self.notification_service.clear_notification_state(domain)
 
             self.log.info(
-                f"[{domain}] Cleanup complete. "
-                f"Deleted {deleted_count} subscriptions "
-                f"and stream record."
+                "[%s] Cleanup complete. Deleted %s subscriptions "
+                "and stream record.",
+                domain,
+                deleted_count,
             )
             self.metrics.remove_stream(domain)

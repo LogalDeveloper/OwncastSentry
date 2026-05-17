@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, Info
 
-from .models import StreamStatus
+from .types import StreamStatus
 
 
 class NotificationType(StrEnum):

@@ -23,12 +23,12 @@ from prometheus_client.exposition import choose_encoder
 
 from .commands import CommandHandler
 from .config import Config
-from .database import StreamRepository, SubscriptionRepository
 from .metrics import ErrorSource, MetricsService
-from .migrations import get_upgrade_table
 from .notification_service import NotificationService
 from .owncast_client import OwncastClient
+from .repository import StreamRepository, SubscriptionRepository, get_upgrade_table
 from .stream_monitor import StreamMonitor
+from .subscription_manager import SubscriptionManager
 
 if TYPE_CHECKING:
     from mautrix.util.async_db import Database, UpgradeTable
@@ -97,12 +97,17 @@ class OwncastSentry(Plugin):
             metrics=self.metrics_service,
         )
 
-        # Initialize command handler
-        self.command_handler = CommandHandler(
+        # Initialize subscription manager
+        self.subscription_manager = SubscriptionManager(
             self.owncast_client,
             self.stream_repo,
             self.subscription_repo,
             self.log,
+        )
+
+        # Initialize command handler
+        self.command_handler = CommandHandler(
+            self.subscription_manager,
         )
 
         # Schedule periodic stream state updates every 60 seconds

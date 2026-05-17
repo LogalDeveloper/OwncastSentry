@@ -23,15 +23,18 @@ from prometheus_client import generate_latest
 
 from owncastsentry import OwncastSentry
 from owncastsentry.config import Config
-from owncastsentry.database import StreamRepository, SubscriptionRepository
-from owncastsentry.migrations import get_upgrade_table
+from owncastsentry.repository import (
+    StreamRepository,
+    SubscriptionRepository,
+    get_upgrade_table,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
     from owncastsentry.metrics import MetricsService
-    from owncastsentry.models import StreamConfig, StreamState
+    from owncastsentry.types import StreamConfig, StreamState
 
 
 def generate_metrics_output(metrics: MetricsService) -> str:
