@@ -115,27 +115,9 @@ class OwncastSentry(Plugin):
         # Schedule stream state updates at the top of each wall-clock minute.
         self.sched.run_later(0, self._run_stream_updates_every_minute())
 
-    async def _run_stream_updates_every_minute(self) -> None:
-        """Run stream state updates at the top of each wall-clock minute."""
-        while True:
-            current_time = datetime.now(UTC)
-            delay = 60 - current_time.second - (current_time.microsecond / 1_000_000)
-            await asyncio.sleep(delay)
-            await self._update_all_stream_states()
-
-    async def _update_all_stream_states(self) -> None:
-        """Update all stream states."""
-        try:
-            # Get list of all stream domains with active subscriptions
-            subscribed_domains = (
-                await self.subscription_repo.get_all_subscribed_domains()
-            )
-
-            # Delegate to stream monitor
-            await self.stream_monitor.update_all_streams(subscribed_domains)
-        except Exception:
-            self.metrics_service.record_error(ErrorSource.SCHEDULER_LOOP)
-            self.log.exception("Unhandled exception in scheduler loop.")
+    async def stop(self) -> None:
+        """Clean up resources by closing the HTTP session."""
+        await self.owncast_client.close()
 
     @command.new(help="Subscribes to a new Owncast stream.")
     @command.argument("url")
@@ -179,6 +161,28 @@ class OwncastSentry(Plugin):
             self.log.exception("Unhandled exception in live command.")
             await evt.reply("An unexpected error occurred. Please try again later.")
 
+    async def _run_stream_updates_every_minute(self) -> None:
+        """Run stream state updates at the top of each wall-clock minute."""
+        while True:
+            current_time = datetime.now(UTC)
+            delay = 60 - current_time.second - (current_time.microsecond / 1_000_000)
+            await asyncio.sleep(delay)
+            await self._update_all_stream_states()
+
+    async def _update_all_stream_states(self) -> None:
+        """Update all stream states."""
+        try:
+            # Get list of all stream domains with active subscriptions
+            subscribed_domains = (
+                await self.subscription_repo.get_all_subscribed_domains()
+            )
+
+            # Delegate to stream monitor
+            await self.stream_monitor.update_all_streams(subscribed_domains)
+        except Exception:
+            self.metrics_service.record_error(ErrorSource.SCHEDULER_LOOP)
+            self.log.exception("Unhandled exception in scheduler loop.")
+
     async def _metrics_endpoint(self, request: web.Request) -> web.Response:
         """Serve Prometheus metrics."""
         accept = request.headers.get("Accept", "")
@@ -187,7 +191,3 @@ class OwncastSentry(Plugin):
         response = web.Response(body=output)
         response.headers["Content-Type"] = content_type
         return response
-
-    async def stop(self) -> None:
-        """Clean up resources by closing the HTTP session."""
-        await self.owncast_client.close()
