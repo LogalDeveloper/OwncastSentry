@@ -66,7 +66,8 @@ class _ResponseTimer:
         """Mark the request as successful so the duration is recorded."""
         self._should_observe = True
 
-    def _finalize(self) -> None:
+    def finalize(self) -> None:
+        """Record or discard the timing observation when the block exits."""
         if self._should_observe:
             self._gauge.labels(domain=self._domain).set(
                 max(time.monotonic() - self._start, 0)
@@ -196,7 +197,7 @@ class MetricsService:
         try:
             yield timer
         finally:
-            timer._finalize()
+            timer.finalize()
 
     def set_build_info(self, version: str) -> None:
         """Set the build version info metric.

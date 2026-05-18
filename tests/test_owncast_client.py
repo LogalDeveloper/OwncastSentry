@@ -45,7 +45,7 @@ class _ChunkedContent:
         """Store chunks to return from iter_chunked."""
         self._chunks = chunks
 
-    async def iter_chunked(self, size: int) -> AsyncIterator[bytes]:
+    async def iter_chunked(self, _size: int) -> AsyncIterator[bytes]:
         """Yield chunks using the interface aiohttp exposes."""
         for chunk in self._chunks:
             yield chunk

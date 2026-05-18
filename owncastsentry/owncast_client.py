@@ -15,6 +15,7 @@
 """HTTP client for querying Owncast instance APIs."""
 
 import json
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
@@ -118,7 +119,7 @@ class OwncastClient:
         url = f"https://{domain}{path}"
         try:
             async with self.session.get(url, allow_redirects=False) as response:
-                if response.status != 200:
+                if response.status != HTTPStatus.OK:
                     self.log.warning(
                         "[%s] Response to request on %s was not 200, got %s instead.",
                         domain,
@@ -147,7 +148,6 @@ class OwncastClient:
                             path,
                         )
                         return None
-                    return result
                 except ValueError as e:
                     self.log.warning(
                         "[%s] Rejecting response to request on %s as could not "
@@ -157,6 +157,8 @@ class OwncastClient:
                         e,
                     )
                     return None
+                else:
+                    return result
         except (aiohttp.ClientError, TimeoutError, OSError) as e:
             self.log.warning("[%s] Error making GET request to %s: %s", domain, path, e)
             return None
@@ -237,8 +239,11 @@ class OwncastClient:
         connector = self.session.connector
         if connector is None:
             return 0
-        idle = sum(len(conns) for conns in connector._conns.values())
-        active = len(connector._acquired)
+
+        # aiohttp does not expose public live pool counts; this metric intentionally
+        # mirrors its internal idle and active connection pools.
+        idle = sum(len(conns) for conns in connector._conns.values())  # noqa: SLF001
+        active = len(connector._acquired)  # noqa: SLF001
         return idle + active
 
     async def close(self) -> None:

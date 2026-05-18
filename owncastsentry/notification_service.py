@@ -101,7 +101,9 @@ class NotificationService:
             return
 
         # Build the notification message
-        body_text = self._format_message(name, title, domain, tags, title_change)
+        body_text = self._format_message(
+            name, title, domain, tags, title_change=title_change
+        )
 
         # Send notifications to all subscribed rooms in parallel
         successful, failed = await self._broadcast_to_rooms(domain, body_text)
@@ -223,6 +225,7 @@ class NotificationService:
         title: str,
         domain: str,
         tags: Sequence[str],
+        *,
         title_change: bool,
     ) -> str:
         """Format the notification message body.

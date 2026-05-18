@@ -256,6 +256,7 @@ class TestFormatMessage:
         title: str,
         domain: str,
         tags: list[str],
+        *,
         title_change: bool,
         expected: str,
         subscription_repo: SubscriptionRepository,
@@ -264,7 +265,9 @@ class TestFormatMessage:
         service = _make_service(
             client=_StubMatrixClient(), subscription_repo=subscription_repo
         )
-        result = service._format_message(name, title, domain, tags, title_change)
+        result = service._format_message(
+            name, title, domain, tags, title_change=title_change
+        )
         assert result == expected
 
 

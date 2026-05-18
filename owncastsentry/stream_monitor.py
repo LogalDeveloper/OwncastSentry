@@ -33,19 +33,27 @@ _TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN = 7 * 60
 
 _CLEANUP_WARNING_THRESHOLD = 83 * 24 * 60
 _CLEANUP_DELETE_THRESHOLD = 90 * 24 * 60
+_QUERY_EVERY_MINUTE_FAILURE_LIMIT = 4
+_QUERY_EVERY_2_MINUTES_FAILURE_LIMIT = 9
+_QUERY_EVERY_3_MINUTES_FAILURE_LIMIT = 14
+_QUERY_EVERY_5_MINUTES_FAILURE_LIMIT = 29
+_QUERY_EVERY_2_MINUTES_INTERVAL = 2
+_QUERY_EVERY_3_MINUTES_INTERVAL = 3
+_QUERY_EVERY_5_MINUTES_INTERVAL = 5
+_QUERY_EVERY_15_MINUTES_INTERVAL = 15
 
 
 def _should_query_stream(failure_counter: int) -> bool:
     """Determine if a stream should be queried based on failure count."""
-    if failure_counter <= 4:
+    if failure_counter <= _QUERY_EVERY_MINUTE_FAILURE_LIMIT:
         return True
-    if failure_counter <= 9:
-        return failure_counter % 2 == 0
-    if failure_counter <= 14:
-        return failure_counter % 3 == 0
-    if failure_counter <= 29:
-        return failure_counter % 5 == 0
-    return failure_counter % 15 == 0
+    if failure_counter <= _QUERY_EVERY_2_MINUTES_FAILURE_LIMIT:
+        return failure_counter % _QUERY_EVERY_2_MINUTES_INTERVAL == 0
+    if failure_counter <= _QUERY_EVERY_3_MINUTES_FAILURE_LIMIT:
+        return failure_counter % _QUERY_EVERY_3_MINUTES_INTERVAL == 0
+    if failure_counter <= _QUERY_EVERY_5_MINUTES_FAILURE_LIMIT:
+        return failure_counter % _QUERY_EVERY_5_MINUTES_INTERVAL == 0
+    return failure_counter % _QUERY_EVERY_15_MINUTES_INTERVAL == 0
 
 
 class StreamMonitor:

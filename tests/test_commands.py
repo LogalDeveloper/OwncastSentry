@@ -16,12 +16,16 @@
 
 import json
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 import pytest
 import time_machine
 from aioresponses import aioresponses
 
 from owncastsentry.commands import (
+    _SECONDS_PER_DAY,
+    _SECONDS_PER_HOUR,
+    _SECONDS_PER_MINUTE,
     _escape_markdown,
     _format_duration,
     _sanitize_for_markdown,
@@ -29,6 +33,11 @@ from owncastsentry.commands import (
 from owncastsentry.owncast_client import _OWNCAST_STATUS_PATH
 from owncastsentry.types import UNKNOWN_STATUS_THRESHOLD, StreamState
 from tests.conftest import VALID_STATUS_RESPONSE
+
+if TYPE_CHECKING:
+    from maubot.testing.bot import TestBot
+
+    from owncastsentry import OwncastSentry
 
 
 class TestEscapeMarkdown:
@@ -78,12 +87,12 @@ class TestFormatDuration:
         [
             pytest.param(1, "1 second", id="singular-second"),
             pytest.param(30, "30 seconds", id="plural-seconds"),
-            pytest.param(60, "1 minute", id="singular-minute"),
-            pytest.param(120, "2 minutes", id="plural-minutes"),
-            pytest.param(3600, "1 hour", id="singular-hour"),
-            pytest.param(7200, "2 hours", id="plural-hours"),
-            pytest.param(86400, "1 day", id="singular-day"),
-            pytest.param(172800, "2 days", id="plural-days"),
+            pytest.param(_SECONDS_PER_MINUTE, "1 minute", id="singular-minute"),
+            pytest.param(2 * _SECONDS_PER_MINUTE, "2 minutes", id="plural-minutes"),
+            pytest.param(_SECONDS_PER_HOUR, "1 hour", id="singular-hour"),
+            pytest.param(2 * _SECONDS_PER_HOUR, "2 hours", id="plural-hours"),
+            pytest.param(_SECONDS_PER_DAY, "1 day", id="singular-day"),
+            pytest.param(2 * _SECONDS_PER_DAY, "2 days", id="plural-days"),
         ],
     )
     def test_formats_duration(self, seconds_ago: int, expected: str) -> None:
@@ -106,10 +115,11 @@ class TestFormatDuration:
         assert _format_duration(timestamp, self._NOW) == "unknown duration"
 
 
+@pytest.mark.usefixtures("maubot_plugin")
 class TestSubscribeCommand:
     """Subscribe command end-to-end via maubot."""
 
-    async def test_subscribe_valid_stream(self, maubot_test_bot, maubot_plugin) -> None:
+    async def test_subscribe_valid_stream(self, maubot_test_bot: TestBot) -> None:
         """Subscribe to a valid Owncast stream."""
         status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
         with aioresponses() as mocked:
@@ -125,9 +135,7 @@ class TestSubscribeCommand:
             "stream.logal.dev goes live."
         )
 
-    async def test_subscribe_invalid_stream(
-        self, maubot_test_bot, maubot_plugin
-    ) -> None:
+    async def test_subscribe_invalid_stream(self, maubot_test_bot: TestBot) -> None:
         """Reject subscription to an invalid Owncast instance."""
         status_url = f"https://invalid.com{_OWNCAST_STATUS_PATH}"
         with aioresponses() as mocked:
@@ -142,9 +150,7 @@ class TestSubscribeCommand:
             "instance is offline."
         )
 
-    async def test_subscribe_already_subscribed(
-        self, maubot_test_bot, maubot_plugin
-    ) -> None:
+    async def test_subscribe_already_subscribed(self, maubot_test_bot: TestBot) -> None:
         """Reject duplicate subscription in the same room."""
         status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
         with aioresponses() as mocked:
@@ -163,7 +169,7 @@ class TestSubscribeCommand:
         )
 
     async def test_subscribe_existing_stream_new_room(
-        self, maubot_test_bot, maubot_plugin
+        self, maubot_test_bot: TestBot
     ) -> None:
         """Skip instance validation when subscribing from a new room."""
         status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
@@ -189,10 +195,11 @@ class TestSubscribeCommand:
         )
 
 
+@pytest.mark.usefixtures("maubot_plugin")
 class TestUnsubscribeCommand:
     """Unsubscribe command end-to-end via maubot."""
 
-    async def test_unsubscribe_existing(self, maubot_test_bot, maubot_plugin) -> None:
+    async def test_unsubscribe_existing(self, maubot_test_bot: TestBot) -> None:
         """Unsubscribe from a subscribed stream."""
         status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
         with aioresponses() as mocked:
@@ -210,9 +217,7 @@ class TestUnsubscribeCommand:
             "longer receive notifications for stream.logal.dev."
         )
 
-    async def test_unsubscribe_not_subscribed(
-        self, maubot_test_bot, maubot_plugin
-    ) -> None:
+    async def test_unsubscribe_not_subscribed(self, maubot_test_bot: TestBot) -> None:
         """Reject unsubscribe from a non-subscribed stream."""
         await maubot_test_bot.send("!unsubscribe unknown.com")
 
@@ -222,10 +227,11 @@ class TestUnsubscribeCommand:
         )
 
 
+@pytest.mark.usefixtures("maubot_plugin")
 class TestSubscriptionsCommand:
     """Subscriptions listing command end-to-end via maubot."""
 
-    async def test_no_subscriptions(self, maubot_test_bot, maubot_plugin) -> None:
+    async def test_no_subscriptions(self, maubot_test_bot: TestBot) -> None:
         """Show help text when no subscriptions exist."""
         await maubot_test_bot.send("!subscriptions")
 
@@ -237,7 +243,9 @@ class TestSubscriptionsCommand:
         )
 
     @time_machine.travel(datetime(2026, 3, 13, 12, 0, 0, tzinfo=UTC))
-    async def test_shows_online_stream(self, maubot_test_bot, maubot_plugin) -> None:
+    async def test_shows_online_stream(
+        self, maubot_test_bot: TestBot, maubot_plugin: OwncastSentry
+    ) -> None:
         """Show stream details including title and duration."""
         # Subscribe first
         status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
@@ -273,7 +281,7 @@ class TestSubscriptionsCommand:
 
     @time_machine.travel(datetime(2026, 3, 13, 12, 0, 0, tzinfo=UTC))
     async def test_escapes_markdown_in_stream_name_and_title(
-        self, maubot_test_bot, maubot_plugin
+        self, maubot_test_bot: TestBot, maubot_plugin: OwncastSentry
     ) -> None:
         """Render stream name and title as literal text in command output."""
         status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
@@ -307,7 +315,9 @@ class TestSubscriptionsCommand:
         assert "Title: `code` &gt; quote #tag" in content.formatted_body
 
     @time_machine.travel(datetime(2026, 3, 13, 12, 0, 0, tzinfo=UTC))
-    async def test_shows_offline_stream(self, maubot_test_bot, maubot_plugin) -> None:
+    async def test_shows_offline_stream(
+        self, maubot_test_bot: TestBot, maubot_plugin: OwncastSentry
+    ) -> None:
         """Show offline status for non-live streams."""
         # Subscribe first
         status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
@@ -340,7 +350,7 @@ class TestSubscriptionsCommand:
         )
 
     async def test_shows_offline_stream_without_disconnect_time(
-        self, maubot_test_bot, maubot_plugin
+        self, maubot_test_bot: TestBot
     ) -> None:
         """Show offline status without duration before first poll completes."""
         status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
@@ -364,7 +374,9 @@ class TestSubscriptionsCommand:
             "instances, use `!unsubscribe <domain>`"
         )
 
-    async def test_shows_unknown_stream(self, maubot_test_bot, maubot_plugin) -> None:
+    async def test_shows_unknown_stream(
+        self, maubot_test_bot: TestBot, maubot_plugin: OwncastSentry
+    ) -> None:
         """Show unknown status when instance has been unreachable."""
         status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
         with aioresponses() as mocked:
@@ -394,7 +406,7 @@ class TestSubscriptionsCommand:
 
     @time_machine.travel(datetime(2026, 3, 13, 12, 0, 0, tzinfo=UTC))
     async def test_shows_multiple_subscriptions(
-        self, maubot_test_bot, maubot_plugin
+        self, maubot_test_bot: TestBot, maubot_plugin: OwncastSentry
     ) -> None:
         """List subscriptions alphabetically with mixed statuses."""
         # Subscribe in reverse alphabetical order to verify sorted output
@@ -446,10 +458,11 @@ class TestSubscriptionsCommand:
         )
 
 
+@pytest.mark.usefixtures("maubot_plugin")
 class TestLiveCommand:
     """Live streams listing command end-to-end via maubot."""
 
-    async def test_no_subscriptions(self, maubot_test_bot, maubot_plugin) -> None:
+    async def test_no_subscriptions(self, maubot_test_bot: TestBot) -> None:
         """Show help text when no subscriptions exist."""
         await maubot_test_bot.send("!live")
 
@@ -460,7 +473,9 @@ class TestLiveCommand:
             "instance, use `!subscribe <domain>`"
         )
 
-    async def test_no_live_streams(self, maubot_test_bot, maubot_plugin) -> None:
+    async def test_no_live_streams(
+        self, maubot_test_bot: TestBot, maubot_plugin: OwncastSentry
+    ) -> None:
         """Show 'no live' message when all streams are offline."""
         # Subscribe first
         status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
@@ -490,7 +505,9 @@ class TestLiveCommand:
         )
 
     @time_machine.travel(datetime(2026, 3, 13, 12, 0, 0, tzinfo=UTC))
-    async def test_shows_live_stream(self, maubot_test_bot, maubot_plugin) -> None:
+    async def test_shows_live_stream(
+        self, maubot_test_bot: TestBot, maubot_plugin: OwncastSentry
+    ) -> None:
         """Show live stream with title and duration."""
         # Subscribe first
         status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
@@ -524,7 +541,7 @@ class TestLiveCommand:
 
     @time_machine.travel(datetime(2026, 3, 13, 12, 0, 0, tzinfo=UTC))
     async def test_shows_multiple_live_streams(
-        self, maubot_test_bot, maubot_plugin
+        self, maubot_test_bot: TestBot, maubot_plugin: OwncastSentry
     ) -> None:
         """List live streams alphabetically with different durations."""
         # Subscribe in reverse alphabetical order to verify sorted output

@@ -28,6 +28,14 @@ from owncastsentry.notification_service import (
 from owncastsentry.stream_monitor import (
     _CLEANUP_DELETE_THRESHOLD,
     _CLEANUP_WARNING_THRESHOLD,
+    _QUERY_EVERY_2_MINUTES_FAILURE_LIMIT,
+    _QUERY_EVERY_2_MINUTES_INTERVAL,
+    _QUERY_EVERY_3_MINUTES_FAILURE_LIMIT,
+    _QUERY_EVERY_3_MINUTES_INTERVAL,
+    _QUERY_EVERY_5_MINUTES_FAILURE_LIMIT,
+    _QUERY_EVERY_5_MINUTES_INTERVAL,
+    _QUERY_EVERY_15_MINUTES_INTERVAL,
+    _QUERY_EVERY_MINUTE_FAILURE_LIMIT,
     _TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN,
     StreamMonitor,
     _should_query_stream,
@@ -122,25 +130,85 @@ class TestShouldQueryStream:
         [
             pytest.param(0, True, id="counter-0-always-query"),
             pytest.param(1, True, id="counter-1-always-query"),
-            pytest.param(4, True, id="counter-4-always-query"),
-            pytest.param(5, False, id="counter-5-skip-odd"),
-            pytest.param(6, True, id="counter-6-query-even"),
-            pytest.param(9, False, id="counter-9-skip-odd"),
-            pytest.param(10, False, id="counter-10-skip-not-mod-3"),
-            pytest.param(12, True, id="counter-12-query-mod-3"),
-            pytest.param(14, False, id="counter-14-skip-not-mod-3"),
-            pytest.param(15, True, id="counter-15-query-mod-5"),
-            pytest.param(16, False, id="counter-16-skip-not-mod-5"),
-            pytest.param(20, True, id="counter-20-query-mod-5"),
-            pytest.param(29, False, id="counter-29-skip-not-mod-5"),
-            pytest.param(30, True, id="counter-30-query-mod-15"),
-            pytest.param(31, False, id="counter-31-skip-not-mod-15"),
-            pytest.param(45, True, id="counter-45-query-mod-15"),
+            pytest.param(
+                _QUERY_EVERY_MINUTE_FAILURE_LIMIT,
+                True,
+                id="last-every-minute-counter",
+            ),
+            pytest.param(
+                _QUERY_EVERY_MINUTE_FAILURE_LIMIT + 1,
+                False,
+                id="first-two-minute-counter-skips-odd",
+            ),
+            pytest.param(
+                _QUERY_EVERY_2_MINUTES_INTERVAL * 3,
+                True,
+                id="two-minute-tier-queries-even",
+            ),
+            pytest.param(
+                _QUERY_EVERY_2_MINUTES_FAILURE_LIMIT,
+                False,
+                id="last-two-minute-counter-skips-odd",
+            ),
+            pytest.param(
+                _QUERY_EVERY_2_MINUTES_FAILURE_LIMIT + 1,
+                False,
+                id="first-three-minute-counter-skips-non-multiple",
+            ),
+            pytest.param(
+                _QUERY_EVERY_3_MINUTES_INTERVAL * 4,
+                True,
+                id="three-minute-tier-queries-multiple",
+            ),
+            pytest.param(
+                _QUERY_EVERY_3_MINUTES_FAILURE_LIMIT,
+                False,
+                id="last-three-minute-counter-skips-non-multiple",
+            ),
+            pytest.param(
+                _QUERY_EVERY_3_MINUTES_FAILURE_LIMIT + 1,
+                True,
+                id="first-five-minute-counter-queries-multiple",
+            ),
+            pytest.param(
+                _QUERY_EVERY_3_MINUTES_FAILURE_LIMIT + 2,
+                False,
+                id="five-minute-tier-skips-non-multiple",
+            ),
+            pytest.param(
+                _QUERY_EVERY_5_MINUTES_INTERVAL * 4,
+                True,
+                id="five-minute-tier-queries-multiple",
+            ),
+            pytest.param(
+                _QUERY_EVERY_5_MINUTES_FAILURE_LIMIT,
+                False,
+                id="last-five-minute-counter-skips-non-multiple",
+            ),
+            pytest.param(
+                _QUERY_EVERY_5_MINUTES_FAILURE_LIMIT + 1,
+                True,
+                id="first-fifteen-minute-counter-queries-multiple",
+            ),
+            pytest.param(
+                _QUERY_EVERY_5_MINUTES_FAILURE_LIMIT + 2,
+                False,
+                id="fifteen-minute-tier-skips-non-multiple",
+            ),
+            pytest.param(
+                _QUERY_EVERY_15_MINUTES_INTERVAL * 3,
+                True,
+                id="fifteen-minute-tier-queries-multiple",
+            ),
             pytest.param(100, False, id="counter-100-skip-not-mod-15"),
-            pytest.param(105, True, id="counter-105-query-mod-15"),
+            pytest.param(
+                _QUERY_EVERY_15_MINUTES_INTERVAL * 7,
+                True,
+                id="fifteen-minute-tier-later-multiple",
+            ),
         ],
     )
-    def test_backoff_tiers(self, counter: int, expected: bool) -> None:
+    def test_backoff_tiers(self, counter: int, *, expected: bool) -> None:
         """Return the expected query decision for each backoff tier."""
         assert _should_query_stream(counter) == expected
 

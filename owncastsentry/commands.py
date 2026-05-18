@@ -31,6 +31,9 @@ if TYPE_CHECKING:
 
 
 _MARKDOWN_ESCAPE_TABLE = str.maketrans({c: f"\\{c}" for c in r"\*_[]()~`#+-=|{}.!<>&"})
+_SECONDS_PER_MINUTE = 60
+_SECONDS_PER_HOUR = 60 * _SECONDS_PER_MINUTE
+_SECONDS_PER_DAY = 24 * _SECONDS_PER_HOUR
 
 
 def _sanitize_for_plain_text(text: str) -> str:
@@ -67,18 +70,19 @@ def _format_duration(timestamp_str: str, now: datetime) -> str:
         seconds = int(delta.total_seconds())
         if seconds < 0:
             return "unknown duration"
-        if seconds < 60:
+        if seconds < _SECONDS_PER_MINUTE:
             return f"{seconds} second{'s' if seconds != 1 else ''}"
-        if seconds < 3600:
-            minutes = seconds // 60
+        if seconds < _SECONDS_PER_HOUR:
+            minutes = seconds // _SECONDS_PER_MINUTE
             return f"{minutes} minute{'s' if minutes != 1 else ''}"
-        if seconds < 86400:
-            hours = seconds // 3600
+        if seconds < _SECONDS_PER_DAY:
+            hours = seconds // _SECONDS_PER_HOUR
             return f"{hours} hour{'s' if hours != 1 else ''}"
-        days = seconds // 86400
-        return f"{days} day{'s' if days != 1 else ''}"
     except TypeError, ValueError:
         return "unknown duration"
+    else:
+        days = seconds // _SECONDS_PER_DAY
+        return f"{days} day{'s' if days != 1 else ''}"
 
 
 class CommandHandler:

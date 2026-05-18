@@ -33,6 +33,10 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
+    from maubot import Plugin
+    from mautrix.util.async_db import UpgradeTable
+    from mautrix.util.config import BaseProxyConfig
+
     from owncastsentry.metrics import MetricsService
     from owncastsentry.types import StreamConfig, StreamState
 
@@ -72,19 +76,19 @@ def subscription_repo(database: Database) -> SubscriptionRepository:
 
 
 @pytest.fixture
-def maubot_plugin_class():
+def maubot_plugin_class() -> type[Plugin]:
     """Use OwncastSentry as the plugin class for maubot integration tests."""
     return OwncastSentry
 
 
 @pytest.fixture
-def maubot_plugin_config_class():
+def maubot_plugin_config_class() -> type[BaseProxyConfig]:
     """Use our Config class for maubot integration tests."""
     return Config
 
 
 @pytest.fixture
-def maubot_upgrade_table():
+def maubot_upgrade_table() -> UpgradeTable:
     """Provide the database upgrade table for maubot integration tests."""
     return get_upgrade_table()
 
@@ -220,7 +224,7 @@ class _StubOwncastClient:
         self.queried_domains.append(domain)
         return self.stream_state
 
-    async def get_stream_config(self, domain: str) -> StreamConfig | None:
+    async def get_stream_config(self, _domain: str) -> StreamConfig | None:
         """Return the configured stream config."""
         self.config_call_count += 1
         return self.stream_config
