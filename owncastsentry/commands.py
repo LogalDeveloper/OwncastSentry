@@ -102,7 +102,7 @@ class CommandHandler:
         """Subscribe a room to a stream's notifications.
 
         :param evt: MessageEvent of the message calling the command.
-        :param url: User supplied URL to a stream to subscribe to.
+        :param url: User-supplied Owncast URL, domain, or Fediverse-style address.
         """
         try:
             stream_domain = await self.subscription_manager.subscribe(evt.room_id, url)
@@ -129,7 +129,7 @@ class CommandHandler:
         """Unsubscribe a room from a stream's notifications.
 
         :param evt: MessageEvent of the message calling the command.
-        :param url: User supplied URL to a stream to unsubscribe from.
+        :param url: User-supplied Owncast URL, domain, or Fediverse-style address.
         """
         try:
             stream_domain = await self.subscription_manager.unsubscribe(
@@ -249,7 +249,7 @@ class CommandHandler:
             # Start building this stream's entry with stream name as main bullet
             parts.append(f"- **{safe_stream_name}**  \n")
 
-            # Add title (should be present for live streams)
+            # Add title when available
             if stream_state.title:
                 safe_title = _sanitize_for_markdown(stream_state.title)
                 parts.append(f"  - Title: {safe_title}  \n")

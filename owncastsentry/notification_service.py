@@ -183,10 +183,11 @@ class NotificationService:
         )
 
     def get_last_notification_time(self, domain: str) -> float:
-        """Get the timestamp of the last notification sent for a domain.
+        """Get the cached live/title-change notification timestamp for a domain.
 
         :param domain: The stream domain.
-        :return: Unix timestamp of last notification, or 0 if never notified.
+        :return: Monotonic timestamp of the last successful live/title-change
+            notification, or 0 if none has been recorded.
         """
         return self.notification_timers_cache.get(domain, 0)
 
@@ -205,7 +206,7 @@ class NotificationService:
         :param room_id: The Matrix room ID to send to.
         :param body_text: The message body text.
         :param domain: The stream domain (for logging).
-        :raises Exception: If sending fails.
+        Propagates send errors so broadcast delivery accounting can count failures.
         """
         try:
             content = TextMessageEventContent(msgtype=MessageType.TEXT, body=body_text)

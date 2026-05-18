@@ -50,7 +50,7 @@ class TestTruncate:
         ],
     )
     def test_truncates(self, text: str, max_length: int, expected: str) -> None:
-        """Truncate text that exceeds the maximum length."""
+        """Return text unchanged within the limit and truncate over-limit text."""
         assert _truncate(text, max_length) == expected
 
 
@@ -117,7 +117,7 @@ class TestStreamStateFromApiResponse:
     """StreamState construction from an API response dictionary."""
 
     def test_typical_response(self) -> None:
-        """Populate all fields from a complete API response."""
+        """Populate API-derived fields from a complete stream state response."""
         response = {
             "streamTitle": "My Stream",
             "lastConnectTime": "2026-01-01T00:00:00Z",

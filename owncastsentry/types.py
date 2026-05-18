@@ -20,12 +20,11 @@ from typing import Any
 
 UNKNOWN_STATUS_THRESHOLD = 15
 
-# Maximum field lengths based on Owncast's configuration
-# Source: https://github.com/owncast/owncast/blob/master/
-#         web/utils/config-constants.tsx
-_MAX_INSTANCE_TITLE_LENGTH = 255  # Server Name (line 81)
-_MAX_STREAM_TITLE_LENGTH = 100  # Stream Title (line 91)
-_MAX_TAG_LENGTH = 24  # Per tag (line 208)
+# Maximum field lengths based on Owncast's admin config constants.
+# Source: https://github.com/owncast/owncast/blob/master/web/utils/config-constants.tsx
+_MAX_INSTANCE_TITLE_LENGTH = 255  # TEXTFIELD_PROPS_SERVER_NAME maxLength
+_MAX_STREAM_TITLE_LENGTH = 100  # TEXTFIELD_PROPS_STREAM_TITLE maxLength
+_MAX_TAG_LENGTH = 24  # tag maxLength
 
 
 class InvalidApiResponseError(ValueError):
@@ -102,10 +101,10 @@ class StreamState:
 
     @property
     def status(self) -> StreamStatus:
-        """Derive stream status from failure count and connect times.
+        """Derive stream status from failure count and last connect time.
 
         Returns UNKNOWN if failures exceed the threshold, ONLINE if a
-        connect time is present, or OFFLINE otherwise.
+        last connect time is present, or OFFLINE otherwise.
         """
         if self.failure_counter > UNKNOWN_STATUS_THRESHOLD:
             return StreamStatus.UNKNOWN
@@ -168,12 +167,12 @@ class StreamConfig:
         :return: StreamConfig instance.
         :raises InvalidApiResponseError: If the response shape is invalid.
         """
-        # Truncate instance name to max length
+        # Apply Owncast's instance name limit.
         name = _truncate(
             _optional_config_str(response, "name"), _MAX_INSTANCE_TITLE_LENGTH
         )
 
-        # Truncate each tag to max length
+        # Apply Owncast's per-tag limit.
         raw_tags = _optional_tag_list(response)
         tags = tuple([_truncate(tag, _MAX_TAG_LENGTH) for tag in raw_tags])
 

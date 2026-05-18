@@ -272,7 +272,7 @@ class TestFormatMessage:
 
 
 class TestNotifyStreamLive:
-    """End-to-end notification sending."""
+    """Live notification sending behavior."""
 
     async def test_sends_to_all_subscribed_rooms(
         self,
@@ -393,7 +393,7 @@ class TestNotifyStreamLive:
         stream_repo: StreamRepository,
         subscription_repo: SubscriptionRepository,
     ) -> None:
-        """Send to remaining rooms after a delivery failure."""
+        """Deliver to other subscribed rooms when one room delivery fails."""
         client = _StubMatrixClient()
         client.should_fail_for_rooms.add("!bad:matrix.org")
         service = _make_service(client=client, subscription_repo=subscription_repo)

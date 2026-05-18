@@ -100,8 +100,7 @@ class StreamMonitor:
 
         total_streams = len(subscribed_domains)
 
-        # Build a list of async tasks for each stream domain
-        # Run all stream updates in parallel and collect results
+        # Run all stream updates concurrently and collect results.
         results = await asyncio.gather(
             *(self.update_stream(domain) for domain in subscribed_domains),
             return_exceptions=True,
@@ -147,9 +146,9 @@ class StreamMonitor:
     async def update_stream(self, domain: str) -> bool:
         """Update the state of a stream and send notifications as needed.
 
-        Sends notifications to subscribed Matrix rooms if a stream goes
-        live. Implements progressive backoff for connection failures and
-        auto-cleanup for dead instances.
+        Sends notifications to subscribed Matrix rooms when a stream goes
+        live or changes title. Implements progressive backoff for connection
+        failures and auto-cleanup for dead instances.
 
         :param domain: The domain of the stream to update.
         :return: True if check succeeded or was skipped, False on failure.
@@ -179,8 +178,8 @@ class StreamMonitor:
             # Backoff is expected behavior, not a failure
             return True
 
-        # Flag: first state update of a brand-new stream to avoid
-        # sending notifications if it's already live.
+        # Flag: no connect/disconnect time has been recorded yet, so suppress
+        # notifications for a stream whose initial history state is live.
         first_update = False
 
         # Flag: whether to update the stream's state in the database.
@@ -222,7 +221,7 @@ class StreamMonitor:
             old_state.last_connect_time is None
             and old_state.last_disconnect_time is None
         ):
-            # Yes, this is the first update. Don't send any notifications.
+            # No stream history has been recorded yet. Don't send notifications.
             update_database = True
             first_update = True
 
@@ -242,7 +241,7 @@ class StreamMonitor:
                 time.monotonic() - self.offline_timer_cache[domain]
             )
 
-            # Have we queried this stream before?
+            # Has a prior connect/disconnect time been recorded?
             if not first_update:
                 # Use fallback values if config fetch failed
                 stream_name = stream_config.name if stream_config else domain
@@ -284,7 +283,7 @@ class StreamMonitor:
                         title_change=False,
                     )
             else:
-                # No, this is the first time we're querying
+                # No stream history has been recorded yet.
                 self.log.info(
                     "[%s] Not sending notifications. This is the first state "
                     "update for this stream.",
@@ -305,9 +304,9 @@ class StreamMonitor:
                 stream_name = stream_config.name if stream_config else domain
                 stream_tags = stream_config.tags if stream_config else ()
 
-                # Was the last notification sent before the stream
-                # last went offline? If so, send a regular go-live
-                # instead of a title change to avoid confusion.
+                # If the offline marker is newer than the last recorded
+                # notification, send a regular go-live instead of a title
+                # change to avoid confusion.
                 if self.offline_timer_cache[
                     domain
                 ] > self.notification_service.get_last_notification_time(domain):

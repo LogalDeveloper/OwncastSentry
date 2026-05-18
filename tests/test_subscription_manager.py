@@ -173,7 +173,7 @@ class TestManagerSubscribe:
         owncast_client: _StubOwncastClient,
         subscription_repo: SubscriptionRepository,
     ) -> None:
-        """Known domains skip remote validation for additional room subscriptions."""
+        """Domains with existing subscriptions skip remote validation."""
         await manager.subscribe("!room1:example.com", "stream.example")
         owncast_client.valid = False
 

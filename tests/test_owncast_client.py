@@ -405,7 +405,7 @@ class TestValidateInstance:
 
 
 class TestResponseTimeMetrics:
-    """Response time histogram recording."""
+    """Response time gauge recording."""
 
     async def test_records_on_success(self) -> None:
         """Record response time on a successful request."""

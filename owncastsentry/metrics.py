@@ -110,7 +110,7 @@ class MetricsService:
         )
         self.api_response_seconds = Gauge(
             "owncastsentry_api_response_seconds",
-            "Last successful HTTP response time in seconds per stream domain",
+            "Last successful Owncast API query duration in seconds per stream domain",
             ["domain"],
             registry=self.registry,
         )
@@ -121,7 +121,7 @@ class MetricsService:
         )
         self.open_connections = Gauge(
             "owncastsentry_http_connections_open",
-            "Total number of open HTTP connections (idle and active)",
+            "Current number of open HTTP connections (idle and active)",
             registry=self.registry,
         )
         self.errors_total = Counter(
@@ -131,7 +131,7 @@ class MetricsService:
             registry=self.registry,
         )
 
-        # Initialize all known label combinations so they start at 0
+        # Initialize known counter label combinations so they start at 0
         for notification_type in NotificationType:
             for result in ("success", "failure"):
                 self.notification_delivery_total.labels(
@@ -186,10 +186,11 @@ class MetricsService:
 
     @contextmanager
     def response_timer(self, domain: str) -> Generator[_ResponseTimer]:
-        """Return a context manager that times an HTTP request.
+        """Return a context manager that times an Owncast API query.
 
         Call ``timer.success()`` inside the block to record the duration.
-        If ``success()`` is never called, nothing is recorded.
+        If ``success()`` is never called, any existing timing label for the
+        domain is removed.
 
         :param domain: The stream domain being queried.
         """

@@ -142,7 +142,7 @@ class TestSetSubscriptionCount:
 
 
 class TestSetCheckFailures:
-    """Check failure counter gauge per domain."""
+    """Consecutive check failure gauge per domain."""
 
     def test_sets_count(self) -> None:
         """Set the failure count for a domain."""
@@ -196,7 +196,7 @@ class TestResponseTimer:
         assert len(matches) == 1
 
     def test_does_not_record_on_exception(self) -> None:
-        """Do not record when the block raises an exception."""
+        """Do not record when the block raises before success() is called."""
         service = MetricsService()
         with (
             pytest.raises(ValueError, match="boom"),

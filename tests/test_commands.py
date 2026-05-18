@@ -60,15 +60,15 @@ class TestEscapeMarkdown:
         ],
     )
     def test_escapes_special_chars(self, input_text: str, expected: str) -> None:
-        """Escape the given Markdown special character."""
+        """Escape Markdown special characters in input text."""
         assert _escape_markdown(input_text) == expected
 
 
 class TestSanitizeForMarkdown:
-    """Markdown sanitization combining newline removal and escaping."""
+    """Markdown sanitization combining whitespace normalization and escaping."""
 
     def test_removes_newlines_and_escapes(self) -> None:
-        """Remove newlines and escape Markdown special characters."""
+        """Normalize newlines and escape Markdown special characters."""
         result = _sanitize_for_markdown("*bold*\nnew line")
         assert result == "\\*bold\\* new line"
 
@@ -171,7 +171,7 @@ class TestSubscribeCommand:
     async def test_subscribe_existing_stream_new_room(
         self, maubot_test_bot: TestBot
     ) -> None:
-        """Skip instance validation when subscribing from a new room."""
+        """Skip validation when the domain already has subscriptions."""
         status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
         with aioresponses() as mocked:
             mocked.get(
@@ -180,9 +180,9 @@ class TestSubscribeCommand:
             )
             await maubot_test_bot.send("!subscribe stream.logal.dev")
 
-        # Subscribe from a different room; skips validation and should not
-        # query the remote instance. An empty aioresponses context will raise
-        # ConnectionError if any HTTP request is attempted.
+        # Subscribe from a different room. The existing subscribed domain skips
+        # validation, so an empty aioresponses context will raise ConnectionError
+        # if any HTTP request is attempted.
         with aioresponses():
             await maubot_test_bot.send(
                 "!subscribe stream.logal.dev", room_id="!otherroom:example.com"
@@ -408,8 +408,8 @@ class TestSubscriptionsCommand:
     async def test_shows_multiple_subscriptions(
         self, maubot_test_bot: TestBot, maubot_plugin: OwncastSentry
     ) -> None:
-        """List subscriptions alphabetically with mixed statuses."""
-        # Subscribe in reverse alphabetical order to verify sorted output
+        """List subscriptions ordered by domain with mixed statuses."""
+        # Subscribe in reverse domain order to verify domain-sorted output
         with aioresponses() as mocked:
             mocked.get(
                 f"https://beta.com{_OWNCAST_STATUS_PATH}",
@@ -543,8 +543,8 @@ class TestLiveCommand:
     async def test_shows_multiple_live_streams(
         self, maubot_test_bot: TestBot, maubot_plugin: OwncastSentry
     ) -> None:
-        """List live streams alphabetically with different durations."""
-        # Subscribe in reverse alphabetical order to verify sorted output
+        """List live streams ordered by domain with different durations."""
+        # Subscribe in reverse domain order to verify domain-sorted output
         with aioresponses() as mocked:
             mocked.get(
                 f"https://beta.com{_OWNCAST_STATUS_PATH}",

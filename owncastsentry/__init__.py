@@ -51,10 +51,10 @@ class OwncastSentry(Plugin):
         return Config
 
     async def start(self) -> None:
-        """Initialize all services and register recurring tasks.
+        """Initialize services and schedule stream state updates.
 
-        Registers a recurring task every minute to update the state of
-        all subscribed streams.
+        Starts a scheduler coroutine that updates subscribed streams at the top
+        of each wall-clock minute.
         """
         # Load configuration
         config: Config = self.config  # type: ignore[assignment]
@@ -170,7 +170,7 @@ class OwncastSentry(Plugin):
             await self._update_all_stream_states()
 
     async def _update_all_stream_states(self) -> None:
-        """Update all stream states."""
+        """Update stream states for domains with active subscriptions."""
         try:
             # Get list of all stream domains with active subscriptions
             subscribed_domains = (
