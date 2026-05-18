@@ -109,60 +109,6 @@ class OwncastClient:
             connector=connector,
         )
 
-    async def _fetch_json(self, domain: str, path: str) -> dict[str, Any] | None:
-        """Fetch and parse JSON from an Owncast API endpoint.
-
-        :param domain: The domain to query.
-        :param path: The API path to request.
-        :return: Parsed JSON response, or None on error.
-        """
-        url = f"https://{domain}{path}"
-        try:
-            async with self.session.get(url, allow_redirects=False) as response:
-                if response.status != HTTPStatus.OK:
-                    self.log.warning(
-                        "[%s] Response to request on %s was not 200, got %s instead.",
-                        domain,
-                        path,
-                        response.status,
-                    )
-                    return None
-                try:
-                    body = await _read_limited_response_body(response)
-                    if body is None:
-                        self.log.warning(
-                            "[%s] Rejecting response to request on %s as it "
-                            "was larger than %s bytes.",
-                            domain,
-                            path,
-                            _MAX_JSON_RESPONSE_BYTES,
-                        )
-                        return None
-
-                    result = json.loads(body)
-                    if not isinstance(result, dict):
-                        self.log.warning(
-                            "[%s] Rejecting response to request on %s as JSON "
-                            "was not an object.",
-                            domain,
-                            path,
-                        )
-                        return None
-                except ValueError as e:
-                    self.log.warning(
-                        "[%s] Rejecting response to request on %s as could not "
-                        "be interpreted as JSON: %s",
-                        domain,
-                        path,
-                        e,
-                    )
-                    return None
-                else:
-                    return result
-        except (aiohttp.ClientError, TimeoutError, OSError) as e:
-            self.log.warning("[%s] Error making GET request to %s: %s", domain, path, e)
-            return None
-
     async def get_stream_state(self, domain: str) -> StreamState | None:
         """Get the current stream state for a given domain.
 
@@ -249,3 +195,57 @@ class OwncastClient:
     async def close(self) -> None:
         """Close the HTTP session."""
         await self.session.close()
+
+    async def _fetch_json(self, domain: str, path: str) -> dict[str, Any] | None:
+        """Fetch and parse JSON from an Owncast API endpoint.
+
+        :param domain: The domain to query.
+        :param path: The API path to request.
+        :return: Parsed JSON response, or None on error.
+        """
+        url = f"https://{domain}{path}"
+        try:
+            async with self.session.get(url, allow_redirects=False) as response:
+                if response.status != HTTPStatus.OK:
+                    self.log.warning(
+                        "[%s] Response to request on %s was not 200, got %s instead.",
+                        domain,
+                        path,
+                        response.status,
+                    )
+                    return None
+                try:
+                    body = await _read_limited_response_body(response)
+                    if body is None:
+                        self.log.warning(
+                            "[%s] Rejecting response to request on %s as it "
+                            "was larger than %s bytes.",
+                            domain,
+                            path,
+                            _MAX_JSON_RESPONSE_BYTES,
+                        )
+                        return None
+
+                    result = json.loads(body)
+                    if not isinstance(result, dict):
+                        self.log.warning(
+                            "[%s] Rejecting response to request on %s as JSON "
+                            "was not an object.",
+                            domain,
+                            path,
+                        )
+                        return None
+                except ValueError as e:
+                    self.log.warning(
+                        "[%s] Rejecting response to request on %s as could not "
+                        "be interpreted as JSON: %s",
+                        domain,
+                        path,
+                        e,
+                    )
+                    return None
+                else:
+                    return result
+        except (aiohttp.ClientError, TimeoutError, OSError) as e:
+            self.log.warning("[%s] Error making GET request to %s: %s", domain, path, e)
+            return None
