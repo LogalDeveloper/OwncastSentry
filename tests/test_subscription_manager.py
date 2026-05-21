@@ -25,11 +25,45 @@ from owncastsentry.types import (
     AlreadySubscribedError,
     InvalidOwncastInstanceError,
     NotSubscribedError,
-    StreamState,
 )
 
 if TYPE_CHECKING:
     from owncastsentry.repository import StreamRepository, SubscriptionRepository
+
+
+class _StubOwncastClient:
+    """Owncast client stub for validation-only manager tests."""
+
+    def __init__(self, *, valid: bool = True) -> None:
+        """Initialize the stub with a fixed validation result."""
+        self.valid = valid
+        self.validated_domains: list[str] = []
+
+    async def validate_instance(self, domain: str) -> bool:
+        """Record the domain and return the configured validation result."""
+        self.validated_domains.append(domain)
+        return self.valid
+
+
+@pytest.fixture
+def owncast_client() -> _StubOwncastClient:
+    """Return a validation-only Owncast client stub."""
+    return _StubOwncastClient()
+
+
+@pytest.fixture
+def manager(
+    owncast_client: _StubOwncastClient,
+    stream_repo: StreamRepository,
+    subscription_repo: SubscriptionRepository,
+) -> SubscriptionManager:
+    """SubscriptionManager built directly for unit tests."""
+    return SubscriptionManager(
+        owncast_client=owncast_client,  # type: ignore[arg-type]
+        stream_repo=stream_repo,
+        subscription_repo=subscription_repo,
+        logger=logging.getLogger("test"),
+    )
 
 
 class TestDomainify:
@@ -72,41 +106,6 @@ class TestDomainify:
     def test_extracts_domain(self, input_url: str, expected: str) -> None:
         """Extract and sanitize the domain from various input formats."""
         assert _domainify(input_url) == expected
-
-
-class _StubOwncastClient:
-    """Owncast client stub for validation-only manager tests."""
-
-    def __init__(self, *, valid: bool = True) -> None:
-        """Initialize the stub with a fixed validation result."""
-        self.valid = valid
-        self.validated_domains: list[str] = []
-
-    async def validate_instance(self, domain: str) -> bool:
-        """Record the domain and return the configured validation result."""
-        self.validated_domains.append(domain)
-        return self.valid
-
-
-@pytest.fixture
-def owncast_client() -> _StubOwncastClient:
-    """Return a validation-only Owncast client stub."""
-    return _StubOwncastClient()
-
-
-@pytest.fixture
-def manager(
-    owncast_client: _StubOwncastClient,
-    stream_repo: StreamRepository,
-    subscription_repo: SubscriptionRepository,
-) -> SubscriptionManager:
-    """SubscriptionManager built directly for unit tests."""
-    return SubscriptionManager(
-        owncast_client=owncast_client,  # type: ignore[arg-type]
-        stream_repo=stream_repo,
-        subscription_repo=subscription_repo,
-        logger=logging.getLogger("test"),
-    )
 
 
 class TestManagerSubscribe:
@@ -226,9 +225,9 @@ class TestManagerListings:
     ) -> None:
         """Return sorted room subscriptions and skip missing stream rows."""
         await stream_repo.create("beta.example")
-        await stream_repo.update(StreamState(domain="beta.example", name="Beta"))
+        await stream_repo.update("beta.example", name="Beta")
         await stream_repo.create("alpha.example")
-        await stream_repo.update(StreamState(domain="alpha.example", name="Alpha"))
+        await stream_repo.update("alpha.example", name="Alpha")
         await subscription_repo.add("beta.example", "!room:example.com")
         await subscription_repo.add("missing.example", "!room:example.com")
         await subscription_repo.add("alpha.example", "!room:example.com")
@@ -253,29 +252,23 @@ class TestManagerListings:
         """Live listing includes only subscriptions with ONLINE stream status."""
         await stream_repo.create("offline.example")
         await stream_repo.update(
-            StreamState(
-                domain="offline.example",
-                name="Offline",
-                status_since="2026-01-01T00:00:00+00:00",
-            )
+            "offline.example",
+            name="Offline",
+            status_since="2026-01-01T00:00:00+00:00",
         )
         await stream_repo.create("online.example")
         await stream_repo.update(
-            StreamState(
-                domain="online.example",
-                name="Online",
-                online=True,
-                status_since="2026-01-01T00:00:00+00:00",
-            )
+            "online.example",
+            name="Online",
+            online=True,
+            status_since="2026-01-01T00:00:00+00:00",
         )
         await stream_repo.create("unknown.example")
         await stream_repo.update(
-            StreamState(
-                domain="unknown.example",
-                name="Unknown",
-                online=True,
-                status_since="2026-01-01T00:00:00+00:00",
-            )
+            "unknown.example",
+            name="Unknown",
+            online=True,
+            status_since="2026-01-01T00:00:00+00:00",
         )
         for _ in range(UNKNOWN_STATUS_THRESHOLD + 1):
             await stream_repo.increment_failure_counter("unknown.example")

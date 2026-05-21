@@ -31,7 +31,7 @@ from owncastsentry.commands import (
     _sanitize_for_markdown,
 )
 from owncastsentry.owncast_client import _OWNCAST_STATUS_PATH
-from owncastsentry.types import UNKNOWN_STATUS_THRESHOLD, StreamState
+from owncastsentry.types import UNKNOWN_STATUS_THRESHOLD
 from tests.conftest import VALID_STATUS_RESPONSE
 
 if TYPE_CHECKING:
@@ -258,13 +258,11 @@ class TestSubscriptionsCommand:
 
         # Update stream state to be online with a name
         await maubot_plugin.stream_repo.update(
-            StreamState(
-                domain="stream.logal.dev",
-                name="Test Stream",
-                title="Playing Games",
-                online=True,
-                status_since="2026-01-01T12:00:00+00:00",
-            )
+            "stream.logal.dev",
+            name="Test Stream",
+            title="Playing Games",
+            online=True,
+            status_since="2026-01-01T12:00:00+00:00",
         )
 
         await maubot_test_bot.send("!subscriptions")
@@ -294,13 +292,11 @@ class TestSubscriptionsCommand:
             await maubot_test_bot.send("!subscribe stream.logal.dev")
 
         await maubot_plugin.stream_repo.update(
-            StreamState(
-                domain="stream.logal.dev",
-                name="*Bold* [link](https://evil.example)\nName",
-                title="`code` > quote #tag",
-                online=True,
-                status_since="2026-01-01T12:00:00+00:00",
-            )
+            "stream.logal.dev",
+            name="*Bold* [link](https://evil.example)\nName",
+            title="`code` > quote #tag",
+            online=True,
+            status_since="2026-01-01T12:00:00+00:00",
         )
 
         await maubot_test_bot.send("!subscriptions")
@@ -332,11 +328,9 @@ class TestSubscriptionsCommand:
 
         # Update stream state to be offline
         await maubot_plugin.stream_repo.update(
-            StreamState(
-                domain="stream.logal.dev",
-                name="Test Stream",
-                status_since="2026-01-01T10:00:00+00:00",
-            )
+            "stream.logal.dev",
+            name="Test Stream",
+            status_since="2026-01-01T10:00:00+00:00",
         )
 
         await maubot_test_bot.send("!subscriptions")
@@ -426,20 +420,16 @@ class TestSubscriptionsCommand:
 
         # Set alpha online, beta offline
         await maubot_plugin.stream_repo.update(
-            StreamState(
-                domain="alpha.com",
-                name="Alpha Stream",
-                title="Streaming Live",
-                online=True,
-                status_since="2026-03-13T10:00:00+00:00",
-            )
+            "alpha.com",
+            name="Alpha Stream",
+            title="Streaming Live",
+            online=True,
+            status_since="2026-03-13T10:00:00+00:00",
         )
         await maubot_plugin.stream_repo.update(
-            StreamState(
-                domain="beta.com",
-                name="Beta Stream",
-                status_since="2026-03-12T18:00:00+00:00",
-            )
+            "beta.com",
+            name="Beta Stream",
+            status_since="2026-03-12T18:00:00+00:00",
         )
 
         await maubot_test_bot.send("!subscriptions")
@@ -491,11 +481,9 @@ class TestLiveCommand:
 
         # Update stream state to offline
         await maubot_plugin.stream_repo.update(
-            StreamState(
-                domain="stream.logal.dev",
-                name="Test Stream",
-                status_since="2026-01-01T10:00:00+00:00",
-            )
+            "stream.logal.dev",
+            name="Test Stream",
+            status_since="2026-01-01T10:00:00+00:00",
         )
 
         await maubot_test_bot.send("!live")
@@ -523,13 +511,11 @@ class TestLiveCommand:
 
         # Update stream state to online
         await maubot_plugin.stream_repo.update(
-            StreamState(
-                domain="stream.logal.dev",
-                name="Test Stream",
-                title="Playing Games",
-                online=True,
-                status_since="2026-01-01T12:00:00+00:00",
-            )
+            "stream.logal.dev",
+            name="Test Stream",
+            title="Playing Games",
+            online=True,
+            status_since="2026-01-01T12:00:00+00:00",
         )
 
         await maubot_test_bot.send("!live")
@@ -563,22 +549,18 @@ class TestLiveCommand:
 
         # Set both streams online with different status timestamps
         await maubot_plugin.stream_repo.update(
-            StreamState(
-                domain="alpha.com",
-                name="Alpha Stream",
-                title="Morning Show",
-                online=True,
-                status_since="2026-03-13T10:00:00+00:00",
-            )
+            "alpha.com",
+            name="Alpha Stream",
+            title="Morning Show",
+            online=True,
+            status_since="2026-03-13T10:00:00+00:00",
         )
         await maubot_plugin.stream_repo.update(
-            StreamState(
-                domain="beta.com",
-                name="Beta Stream",
-                title="Evening Vibes",
-                online=True,
-                status_since="2026-03-13T06:00:00+00:00",
-            )
+            "beta.com",
+            name="Beta Stream",
+            title="Evening Vibes",
+            online=True,
+            status_since="2026-03-13T06:00:00+00:00",
         )
 
         await maubot_test_bot.send("!live")

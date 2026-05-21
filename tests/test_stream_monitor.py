@@ -16,9 +16,11 @@
 
 import logging
 import time
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 import pytest
+import time_machine
 
 from owncastsentry.metrics import MetricsService
 from owncastsentry.notification_service import (
@@ -38,9 +40,18 @@ from owncastsentry.stream_monitor import (
     _QUERY_EVERY_MINUTE_FAILURE_LIMIT,
     _TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN,
     StreamMonitor,
+    _classify_notification,
+    _classify_transition,
+    _NotificationKind,
     _should_query_stream,
+    _StreamTransitionKind,
 )
-from owncastsentry.types import StreamConfig, StreamState, StreamStatus
+from owncastsentry.types import (
+    StreamConfigObservation,
+    StreamState,
+    StreamStateObservation,
+    StreamStatus,
+)
 from tests.conftest import (
     _StubMatrixClient,
     _StubOwncastClient,
@@ -92,15 +103,26 @@ async def _seed_stream(
 ) -> None:
     """Insert a stream and subscription into the database."""
     await stream_repo.create(domain)
-    state = StreamState(
-        domain=domain,
+    await stream_repo.update(
+        domain,
         name=name,
         title=title,
         online=online,
         status_since=status_since,
     )
-    await stream_repo.update(state)
     await subscription_repo.add(domain, room_id)
+
+
+def _stream_observation(
+    domain: str,
+    *,
+    observed_at: str,
+    title: str | None = None,
+    online: bool = False,
+) -> StreamStateObservation:
+    """Create a stream observation at a deterministic time."""
+    with time_machine.travel(datetime.fromisoformat(observed_at), tick=False):
+        return StreamStateObservation(domain=domain, title=title, online=online)
 
 
 def _make_monitor_with_metrics(
@@ -213,6 +235,254 @@ class TestShouldQueryStream:
         assert _should_query_stream(counter) == expected
 
 
+class TestClassifyTransition:
+    """Pure stream state transition classification."""
+
+    def test_first_observation(self) -> None:
+        """Classify a missing stored timestamp as the first observation."""
+        old_state = StreamState(domain="example.com")
+        observation = _stream_observation(
+            domain="example.com",
+            title="Live",
+            online=True,
+            observed_at="2026-01-01T12:00:00+00:00",
+        )
+
+        transition = _classify_transition(old_state, observation)
+
+        assert transition.kind is _StreamTransitionKind.FIRST_OBSERVATION
+        assert transition.status_since == observation.observed_at
+
+    def test_went_live(self) -> None:
+        """Classify an offline to online status change."""
+        old_state = StreamState(
+            domain="example.com",
+            title="Title",
+            status_since="2026-01-01T10:00:00+00:00",
+        )
+        observation = _stream_observation(
+            domain="example.com",
+            title="Title",
+            online=True,
+            observed_at="2026-01-01T12:00:00+00:00",
+        )
+
+        transition = _classify_transition(old_state, observation)
+
+        assert transition.kind is _StreamTransitionKind.WENT_LIVE
+        assert transition.status_since == observation.observed_at
+
+    def test_went_offline(self) -> None:
+        """Classify an online to offline status change."""
+        old_state = StreamState(
+            domain="example.com",
+            title="Title",
+            online=True,
+            status_since="2026-01-01T10:00:00+00:00",
+        )
+        observation = _stream_observation(
+            domain="example.com",
+            title="Title",
+            observed_at="2026-01-01T12:00:00+00:00",
+        )
+
+        transition = _classify_transition(old_state, observation)
+
+        assert transition.kind is _StreamTransitionKind.WENT_OFFLINE
+        assert transition.status_since == observation.observed_at
+
+    def test_online_title_changed(self) -> None:
+        """Classify an online title change without resetting status duration."""
+        old_state = StreamState(
+            domain="example.com",
+            title="Old",
+            online=True,
+            status_since="2026-01-01T10:00:00+00:00",
+        )
+        observation = _stream_observation(
+            domain="example.com",
+            title="New",
+            online=True,
+            observed_at="2026-01-01T12:00:00+00:00",
+        )
+
+        transition = _classify_transition(old_state, observation)
+
+        assert transition.kind is _StreamTransitionKind.TITLE_CHANGED
+        assert transition.status_since == old_state.status_since
+
+    def test_unchanged(self) -> None:
+        """Classify identical status and title as unchanged."""
+        old_state = StreamState(
+            domain="example.com",
+            title="Same",
+            status_since="2026-01-01T10:00:00+00:00",
+        )
+        observation = _stream_observation(
+            domain="example.com",
+            title="Same",
+            observed_at="2026-01-01T12:00:00+00:00",
+        )
+
+        transition = _classify_transition(old_state, observation)
+
+        assert transition.kind is _StreamTransitionKind.STATUS_UNCHANGED
+        assert transition.status_since == old_state.status_since
+
+    def test_offline_title_change_keeps_status_timestamp(self) -> None:
+        """Keep offline status duration when only the title changes."""
+        old_state = StreamState(
+            domain="example.com",
+            title="Old",
+            status_since="2026-01-01T10:00:00+00:00",
+        )
+        observation = _stream_observation(
+            domain="example.com",
+            title="New",
+            observed_at="2026-01-01T12:00:00+00:00",
+        )
+
+        transition = _classify_transition(old_state, observation)
+
+        assert transition.kind is _StreamTransitionKind.STATUS_UNCHANGED
+        assert transition.status_since == old_state.status_since
+
+
+class TestClassifyNotification:
+    """Live/title notification policy classification."""
+
+    def test_first_observation_suppresses_notification(self) -> None:
+        """Do not notify for the first observed stream state."""
+        old_state = StreamState(domain="example.com")
+        observation = _stream_observation(
+            domain="example.com",
+            online=True,
+            observed_at="2026-01-01T12:00:00+00:00",
+        )
+        transition = _classify_transition(old_state, observation)
+
+        notification_kind = _classify_notification(transition, old_state, observation)
+
+        assert notification_kind is _NotificationKind.NONE
+
+    def test_normal_went_live_notifies_live(self) -> None:
+        """Notify live after a non-brief offline gap."""
+        old_state = StreamState(
+            domain="example.com",
+            title="Title",
+            status_since="2026-01-01T10:00:00+00:00",
+        )
+        observation = _stream_observation(
+            domain="example.com",
+            title="Title",
+            online=True,
+            observed_at="2026-01-01T12:00:00+00:00",
+        )
+        transition = _classify_transition(old_state, observation)
+
+        notification_kind = _classify_notification(
+            transition,
+            old_state,
+            observation,
+            offline_duration_seconds=_TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN + 1,
+        )
+
+        assert notification_kind is _NotificationKind.LIVE
+
+    def test_brief_outage_same_title_suppresses_notification(self) -> None:
+        """Do not notify when a stream briefly returns with the same title."""
+        old_state = StreamState(
+            domain="example.com",
+            title="Same",
+            status_since="2026-01-01T10:00:00+00:00",
+        )
+        observation = _stream_observation(
+            domain="example.com",
+            title="Same",
+            online=True,
+            observed_at="2026-01-01T12:00:00+00:00",
+        )
+        transition = _classify_transition(old_state, observation)
+
+        notification_kind = _classify_notification(
+            transition,
+            old_state,
+            observation,
+            offline_duration_seconds=60,
+        )
+
+        assert notification_kind is _NotificationKind.NONE
+
+    def test_brief_outage_title_change_notifies_title_change(self) -> None:
+        """Notify title change when a brief return changes title."""
+        old_state = StreamState(
+            domain="example.com",
+            title="Old",
+            status_since="2026-01-01T10:00:00+00:00",
+        )
+        observation = _stream_observation(
+            domain="example.com",
+            title="New",
+            online=True,
+            observed_at="2026-01-01T12:00:00+00:00",
+        )
+        transition = _classify_transition(old_state, observation)
+
+        notification_kind = _classify_notification(
+            transition,
+            old_state,
+            observation,
+            offline_duration_seconds=60,
+        )
+
+        assert notification_kind is _NotificationKind.TITLE_CHANGE
+
+    def test_mid_session_title_change_notifies_title_change(self) -> None:
+        """Notify title change for a normal online title change."""
+        old_state = StreamState(
+            domain="example.com",
+            title="Old",
+            online=True,
+            status_since="2026-01-01T10:00:00+00:00",
+        )
+        observation = _stream_observation(
+            domain="example.com",
+            title="New",
+            online=True,
+            observed_at="2026-01-01T12:00:00+00:00",
+        )
+        transition = _classify_transition(old_state, observation)
+
+        notification_kind = _classify_notification(transition, old_state, observation)
+
+        assert notification_kind is _NotificationKind.TITLE_CHANGE
+
+    def test_went_offline_after_last_notification_notifies_live(self) -> None:
+        """Notify live when stream went offline after the last notification."""
+        old_state = StreamState(
+            domain="example.com",
+            title="Old",
+            online=True,
+            status_since="2026-01-01T10:00:00+00:00",
+        )
+        observation = _stream_observation(
+            domain="example.com",
+            title="New",
+            online=True,
+            observed_at="2026-01-01T12:00:00+00:00",
+        )
+        transition = _classify_transition(old_state, observation)
+
+        notification_kind = _classify_notification(
+            transition,
+            old_state,
+            observation,
+            went_offline_after_last_notification=True,
+        )
+
+        assert notification_kind is _NotificationKind.LIVE
+
+
 class TestUpdateAllStreams:
     """Parallel stream update orchestration."""
 
@@ -223,12 +493,12 @@ class TestUpdateAllStreams:
     ) -> None:
         """Return an UpdateResult with correct success and failure counts."""
         owncast = _StubOwncastClient(
-            stream_state=StreamState(
+            stream_state=_stream_observation(
                 domain="ok.com",
                 online=True,
-                status_since="2026-01-01T00:00:00+00:00",
+                observed_at="2026-01-01T00:00:00+00:00",
             ),
-            stream_config=StreamConfig(name="OK"),
+            stream_config=StreamConfigObservation(name="OK"),
         )
         client = _StubMatrixClient()
         monitor, _ = _make_monitor(
@@ -240,9 +510,9 @@ class TestUpdateAllStreams:
 
         await _seed_stream(stream_repo, subscription_repo, domain="ok.com")
 
-        result = await monitor.update_all_streams(["ok.com"])
-        assert result.total_streams == 1
-        assert result.successful_checks == 1
+        result = await monitor.update_all_streams(["ok.com", "missing.com"])
+        assert result.total_streams == 2
+        assert result.successful_checks == 2
         assert result.failed_checks == 0
         assert owncast.queried_domains == ["ok.com"]
 
@@ -274,6 +544,7 @@ class TestUpdateStreamBackoff:
         result = await monitor.update_stream("fail.com")
         assert result is True
         assert owncast.state_call_count == 0
+        assert owncast.config_call_count == 0
 
         # Counter should have been incremented to 6
         state = await stream_repo.get_by_domain("fail.com")
@@ -291,12 +562,12 @@ class TestUpdateStreamFirstUpdate:
     ) -> None:
         """Skip notifications when a stream is already live on first update."""
         owncast = _StubOwncastClient(
-            stream_state=StreamState(
+            stream_state=_stream_observation(
                 domain="new.com",
                 online=True,
-                status_since="2026-01-01T00:00:00+00:00",
+                observed_at="2026-01-01T12:01:00+00:00",
             ),
-            stream_config=StreamConfig(name="New Stream"),
+            stream_config=StreamConfigObservation(name="New Stream"),
         )
         client = _StubMatrixClient()
         monitor, _ = _make_monitor(
@@ -313,6 +584,45 @@ class TestUpdateStreamFirstUpdate:
         result = await monitor.update_stream("new.com")
         assert result is True
         assert len(client.sent_messages) == 0
+        assert owncast.config_call_count == 1
+
+    async def test_fetches_config_and_saves_name_on_first_update(
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Fetch config on first update and persist the stream display name."""
+        owncast = _StubOwncastClient(
+            stream_state=_stream_observation(
+                domain="new.com",
+                title="First Title",
+                online=True,
+                observed_at="2026-01-01T12:01:00+00:00",
+            ),
+            stream_config=StreamConfigObservation(name="New Stream"),
+        )
+        client = _StubMatrixClient()
+        monitor, _ = _make_monitor(
+            owncast_client=owncast,
+            stream_repo=stream_repo,
+            subscription_repo=subscription_repo,
+            client=client,
+        )
+
+        await stream_repo.create("new.com")
+        await subscription_repo.add("new.com", "!room:matrix.org")
+
+        result = await monitor.update_stream("new.com")
+
+        assert result is True
+        assert len(client.sent_messages) == 0
+        assert owncast.config_call_count == 1
+        state = await stream_repo.get_by_domain("new.com")
+        assert state is not None
+        assert state.name == "New Stream"
+        assert state.title == "First Title"
+        assert state.online is True
+        assert state.status_since == "2026-01-01T12:01:00+00:00"
 
     async def test_no_notification_on_first_offline(
         self,
@@ -321,11 +631,11 @@ class TestUpdateStreamFirstUpdate:
     ) -> None:
         """Skip notifications when a stream is offline on first update."""
         owncast = _StubOwncastClient(
-            stream_state=StreamState(
+            stream_state=_stream_observation(
                 domain="new.com",
-                status_since="2025-12-31T00:00:00+00:00",
+                observed_at="2025-12-31T12:01:00+00:00",
             ),
-            stream_config=StreamConfig(name="New Stream"),
+            stream_config=StreamConfigObservation(name="New Stream"),
         )
         client = _StubMatrixClient()
         monitor, _ = _make_monitor(
@@ -341,6 +651,7 @@ class TestUpdateStreamFirstUpdate:
         result = await monitor.update_stream("new.com")
         assert result is True
         assert len(client.sent_messages) == 0
+        assert owncast.config_call_count == 1
 
 
 class TestUpdateStreamGoesLive:
@@ -353,13 +664,13 @@ class TestUpdateStreamGoesLive:
     ) -> None:
         """Send go-live with stream name and tags."""
         owncast = _StubOwncastClient(
-            stream_state=StreamState(
+            stream_state=_stream_observation(
                 domain="live.com",
                 title="Now Streaming",
                 online=True,
-                status_since="2026-01-01T12:00:00+00:00",
+                observed_at="2026-01-01T12:00:00+00:00",
             ),
-            stream_config=StreamConfig(name="Live Stream", tags=("gaming",)),
+            stream_config=StreamConfigObservation(name="Live Stream", tags=("gaming",)),
         )
         client = _StubMatrixClient()
         monitor, _ = _make_monitor(
@@ -393,6 +704,7 @@ class TestUpdateStreamGoesLive:
             "\n"
             "#gaming"
         )
+        assert owncast.config_call_count == 1
 
     async def test_falls_back_when_config_fetch_fails(
         self,
@@ -401,11 +713,11 @@ class TestUpdateStreamGoesLive:
     ) -> None:
         """Use domain as name in go-live when config fetch fails."""
         owncast = _StubOwncastClient(
-            stream_state=StreamState(
+            stream_state=_stream_observation(
                 domain="live.com",
                 title="Now Streaming",
                 online=True,
-                status_since="2026-01-01T12:00:00+00:00",
+                observed_at="2026-01-01T12:00:00+00:00",
             ),
             stream_config=None,
         )
@@ -437,6 +749,7 @@ class TestUpdateStreamGoesLive:
             "\n"
             "To tune in, visit: https://live.com/"
         )
+        assert owncast.config_call_count == 1
 
 
 class TestUpdateStreamBriefOffline:
@@ -449,13 +762,13 @@ class TestUpdateStreamBriefOffline:
     ) -> None:
         """Skip notification for a brief outage with no title change."""
         owncast = _StubOwncastClient(
-            stream_state=StreamState(
+            stream_state=_stream_observation(
                 domain="brief.com",
                 title="Same Title",
                 online=True,
-                status_since="2026-01-01T12:00:00+00:00",
+                observed_at="2026-01-01T12:01:00+00:00",
             ),
-            stream_config=StreamConfig(name="Brief Stream"),
+            stream_config=StreamConfigObservation(name="Brief Stream"),
         )
         client = _StubMatrixClient()
         monitor, _ = _make_monitor(
@@ -480,6 +793,11 @@ class TestUpdateStreamBriefOffline:
         result = await monitor.update_stream("brief.com")
         assert result is True
         assert len(client.sent_messages) == 0
+        assert owncast.config_call_count == 0
+        state = await stream_repo.get_by_domain("brief.com")
+        assert state is not None
+        assert state.online is True
+        assert state.status_since == "2026-01-01T12:01:00+00:00"
 
     async def test_title_change_notification(
         self,
@@ -488,13 +806,13 @@ class TestUpdateStreamBriefOffline:
     ) -> None:
         """Send a title-change notification for a brief outage with a new title."""
         owncast = _StubOwncastClient(
-            stream_state=StreamState(
+            stream_state=_stream_observation(
                 domain="brief.com",
                 title="New Title",
                 online=True,
-                status_since="2026-01-01T12:00:00+00:00",
+                observed_at="2026-01-01T12:00:00+00:00",
             ),
-            stream_config=StreamConfig(name="Brief Stream"),
+            stream_config=StreamConfigObservation(name="Brief Stream"),
         )
         client = _StubMatrixClient()
         monitor, _ = _make_monitor(
@@ -525,6 +843,10 @@ class TestUpdateStreamBriefOffline:
             "\n"
             "To tune in, visit: https://brief.com/"
         )
+        assert owncast.config_call_count == 1
+        state = await stream_repo.get_by_domain("brief.com")
+        assert state is not None
+        assert state.name == "Brief Stream"
 
 
 class TestUpdateStreamTitleChange:
@@ -537,11 +859,11 @@ class TestUpdateStreamTitleChange:
     ) -> None:
         """Use domain as name in title-change when config fails."""
         owncast = _StubOwncastClient(
-            stream_state=StreamState(
+            stream_state=_stream_observation(
                 domain="title.com",
                 title="Updated Title",
                 online=True,
-                status_since="2026-01-01T12:00:00+00:00",
+                observed_at="2026-01-01T12:00:00+00:00",
             ),
             stream_config=None,
         )
@@ -580,6 +902,7 @@ class TestUpdateStreamTitleChange:
             "\n"
             "To tune in, visit: https://title.com/"
         )
+        assert owncast.config_call_count == 1
 
     async def test_sends_title_change(
         self,
@@ -588,13 +911,13 @@ class TestUpdateStreamTitleChange:
     ) -> None:
         """Send a title-change notification when the title changes mid-stream."""
         owncast = _StubOwncastClient(
-            stream_state=StreamState(
+            stream_state=_stream_observation(
                 domain="title.com",
                 title="Updated Title",
                 online=True,
-                status_since="2026-01-01T12:00:00+00:00",
+                observed_at="2026-01-01T12:00:00+00:00",
             ),
-            stream_config=StreamConfig(name="Title Stream"),
+            stream_config=StreamConfigObservation(name="Title Stream"),
         )
         client = _StubMatrixClient()
         monitor, notification_service = _make_monitor(
@@ -634,6 +957,7 @@ class TestUpdateStreamTitleChange:
             "\n"
             "To tune in, visit: https://title.com/"
         )
+        assert owncast.config_call_count == 1
 
     async def test_sends_go_live_when_last_notification_before_offline(
         self,
@@ -642,13 +966,13 @@ class TestUpdateStreamTitleChange:
     ) -> None:
         """Send go-live instead of title-change after an offline gap."""
         owncast = _StubOwncastClient(
-            stream_state=StreamState(
+            stream_state=_stream_observation(
                 domain="title.com",
                 title="Updated Title",
                 online=True,
-                status_since="2026-01-01T12:00:00+00:00",
+                observed_at="2026-01-01T12:00:00+00:00",
             ),
-            stream_config=StreamConfig(name="Title Stream"),
+            stream_config=StreamConfigObservation(name="Title Stream"),
         )
         client = _StubMatrixClient()
         monitor, notification_service = _make_monitor(
@@ -686,6 +1010,7 @@ class TestUpdateStreamTitleChange:
             "\n"
             "To tune in, visit: https://title.com/"
         )
+        assert owncast.config_call_count == 1
 
 
 class TestUpdateStreamGoesOffline:
@@ -698,12 +1023,12 @@ class TestUpdateStreamGoesOffline:
     ) -> None:
         """Record the offline time in the cache when a stream goes offline."""
         owncast = _StubOwncastClient(
-            stream_state=StreamState(
+            stream_state=_stream_observation(
                 domain="offline.com",
                 title="Title",
-                status_since="2026-01-01T12:00:00+00:00",
+                observed_at="2026-01-01T12:01:00+00:00",
             ),
-            stream_config=StreamConfig(name="Offline Stream"),
+            stream_config=StreamConfigObservation(name="Offline Stream"),
         )
         client = _StubMatrixClient()
         monitor, _ = _make_monitor(
@@ -730,6 +1055,180 @@ class TestUpdateStreamGoesOffline:
         assert result is True
         assert before <= monitor.offline_timer_cache["offline.com"] <= after
         assert len(client.sent_messages) == 0
+        assert owncast.config_call_count == 0
+        state = await stream_repo.get_by_domain("offline.com")
+        assert state is not None
+        assert state.online is False
+        assert state.name == "Test Stream"
+
+
+class TestUpdateStreamNoStateChange:
+    """Offline stream persistence and config refresh behavior."""
+
+    async def test_does_not_fetch_config_for_unchanged_non_hourly_state(
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Do not fetch config when state is unchanged outside hourly refresh."""
+        owncast = _StubOwncastClient(
+            stream_state=_stream_observation(
+                domain="stable.com",
+                title="Same Title",
+                observed_at="2026-01-01T12:01:00+00:00",
+            ),
+        )
+        client = _StubMatrixClient()
+        monitor, _ = _make_monitor(
+            owncast_client=owncast,
+            stream_repo=stream_repo,
+            subscription_repo=subscription_repo,
+            client=client,
+        )
+
+        # Seed as offline with same status timestamp and title.
+        await _seed_stream(
+            stream_repo,
+            subscription_repo,
+            domain="stable.com",
+            title="Same Title",
+            status_since="2026-01-01T12:00:00+00:00",
+        )
+
+        result = await monitor.update_stream("fail.com")
+        assert result is True
+        assert len(client.sent_messages) == 0
+        # Config should not have been fetched since this was not an hourly refresh.
+        assert owncast.config_call_count == 0
+
+    async def test_refreshes_config_at_top_of_hour(
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Refresh and persist stream config during the hourly refresh window."""
+        owncast = _StubOwncastClient(
+            stream_state=_stream_observation(
+                domain="stable.com",
+                title="Same Title",
+                observed_at="2026-01-01T12:00:30+00:00",
+            ),
+            stream_config=StreamConfigObservation(name="Updated Stream"),
+        )
+        client = _StubMatrixClient()
+        monitor, _ = _make_monitor(
+            owncast_client=owncast,
+            stream_repo=stream_repo,
+            subscription_repo=subscription_repo,
+            client=client,
+        )
+
+        await _seed_stream(
+            stream_repo,
+            subscription_repo,
+            domain="stable.com",
+            name="Old Stream",
+            title="Same Title",
+            status_since="2026-01-01T10:00:00+00:00",
+        )
+
+        result = await monitor.update_stream("stable.com")
+
+        assert result is True
+        assert len(client.sent_messages) == 0
+        assert owncast.config_call_count == 1
+        state = await stream_repo.get_by_domain("stable.com")
+        assert state is not None
+        assert state.name == "Updated Stream"
+        assert state.title == "Same Title"
+        assert state.status_since == "2026-01-01T10:00:00+00:00"
+
+    async def test_saves_offline_title_change(
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Save title-only changes while the stream remains offline."""
+        owncast = _StubOwncastClient(
+            stream_state=_stream_observation(
+                domain="stable.com",
+                title="New Offline Title",
+                observed_at="2026-01-01T12:30:00+00:00",
+            ),
+        )
+        client = _StubMatrixClient()
+        monitor, _ = _make_monitor(
+            owncast_client=owncast,
+            stream_repo=stream_repo,
+            subscription_repo=subscription_repo,
+            client=client,
+        )
+
+        await _seed_stream(
+            stream_repo,
+            subscription_repo,
+            domain="stable.com",
+            title="Old Offline Title",
+            status_since="2026-01-01T12:00:00+00:00",
+        )
+
+        result = await monitor.update_stream("stable.com")
+
+        assert result is True
+        assert len(client.sent_messages) == 0
+        assert owncast.config_call_count == 0
+        state = await stream_repo.get_by_domain("stable.com")
+        assert state is not None
+        assert state.title == "New Offline Title"
+        assert state.status_since == "2026-01-01T12:00:00+00:00"
+
+
+class TestUpdateStreamFailureCounterReset:
+    """Failure counter reset on successful fetch."""
+
+    async def test_resets_counter_on_success(
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Reset the failure counter to zero after a successful fetch."""
+        owncast = _StubOwncastClient(
+            stream_state=_stream_observation(
+                domain="recover.com",
+                title="Title",
+                observed_at="2026-01-01T12:00:00+00:00",
+            ),
+        )
+        client = _StubMatrixClient()
+        monitor, _ = _make_monitor(
+            owncast_client=owncast,
+            stream_repo=stream_repo,
+            subscription_repo=subscription_repo,
+            client=client,
+        )
+
+        await _seed_stream(
+            stream_repo,
+            subscription_repo,
+            domain="recover.com",
+            title="Title",
+            status_since="2026-01-01T12:00:00+00:00",
+        )
+
+        # Simulate prior failures (counter=4 still passes backoff)
+        for _ in range(4):
+            await stream_repo.increment_failure_counter("recover.com")
+
+        state = await stream_repo.get_by_domain("recover.com")
+        assert state is not None
+        assert state.failure_counter == 4
+
+        result = await monitor.update_stream("recover.com")
+        assert result is True
+
+        state = await stream_repo.get_by_domain("recover.com")
+        assert state is not None
+        assert state.failure_counter == 0
 
 
 class TestUpdateStreamConnectionFailure:
@@ -759,6 +1258,7 @@ class TestUpdateStreamConnectionFailure:
 
         result = await monitor.update_stream("fail.com")
         assert result is False
+        assert owncast.config_call_count == 0
 
         state = await stream_repo.get_by_domain("fail.com")
         assert state is not None
@@ -863,94 +1363,6 @@ class TestCheckCleanupThresholds:
         assert await stream_repo.get_by_domain("ok.com") is not None
 
 
-class TestUpdateStreamNoStateChange:
-    """Stream that stays offline across updates with no state change."""
-
-    async def test_skips_database_write(
-        self,
-        stream_repo: StreamRepository,
-        subscription_repo: SubscriptionRepository,
-    ) -> None:
-        """Skip the database write when stream state has not changed."""
-        owncast = _StubOwncastClient(
-            stream_state=StreamState(
-                domain="stable.com",
-                title="Same Title",
-                status_since="2026-01-01T12:00:00+00:00",
-            ),
-        )
-        client = _StubMatrixClient()
-        monitor, _ = _make_monitor(
-            owncast_client=owncast,
-            stream_repo=stream_repo,
-            subscription_repo=subscription_repo,
-            client=client,
-        )
-
-        # Seed as offline with same status timestamp and title.
-        await _seed_stream(
-            stream_repo,
-            subscription_repo,
-            domain="stable.com",
-            title="Same Title",
-            status_since="2026-01-01T12:00:00+00:00",
-        )
-
-        result = await monitor.update_stream("stable.com")
-        assert result is True
-        assert len(client.sent_messages) == 0
-        # Config should not have been fetched since no DB update was needed
-        assert owncast.config_call_count == 0
-
-
-class TestUpdateStreamFailureCounterReset:
-    """Failure counter reset on successful fetch."""
-
-    async def test_resets_counter_on_success(
-        self,
-        stream_repo: StreamRepository,
-        subscription_repo: SubscriptionRepository,
-    ) -> None:
-        """Reset the failure counter to zero after a successful fetch."""
-        owncast = _StubOwncastClient(
-            stream_state=StreamState(
-                domain="recover.com",
-                title="Title",
-                status_since="2026-01-01T12:00:00+00:00",
-            ),
-        )
-        client = _StubMatrixClient()
-        monitor, _ = _make_monitor(
-            owncast_client=owncast,
-            stream_repo=stream_repo,
-            subscription_repo=subscription_repo,
-            client=client,
-        )
-
-        await _seed_stream(
-            stream_repo,
-            subscription_repo,
-            domain="recover.com",
-            title="Title",
-            status_since="2026-01-01T12:00:00+00:00",
-        )
-
-        # Simulate prior failures (counter=4 still passes backoff)
-        for _ in range(4):
-            await stream_repo.increment_failure_counter("recover.com")
-
-        state = await stream_repo.get_by_domain("recover.com")
-        assert state is not None
-        assert state.failure_counter == 4
-
-        result = await monitor.update_stream("recover.com")
-        assert result is True
-
-        state = await stream_repo.get_by_domain("recover.com")
-        assert state is not None
-        assert state.failure_counter == 0
-
-
 class TestUpdateAllStreamsMixed:
     """Mixed success/failure results from parallel updates."""
 
@@ -1001,16 +1413,16 @@ class TestUpdateAllStreamsMixed:
     ) -> None:
         """Count an unhandled exception as a failure without aborting other updates."""
         owncast = _StubOwncastClient(
-            stream_state=StreamState(
+            stream_state=_stream_observation(
                 domain="ok.com",
                 title="Title",
-                status_since="2026-01-01T00:00:00+00:00",
+                observed_at="2026-01-01T00:00:00+00:00",
             ),
         )
         # Patch get_stream_state to raise for one specific domain
         original_get_state = owncast.get_stream_state
 
-        async def raising_get_state(domain: str) -> StreamState | None:
+        async def raising_get_state(domain: str) -> StreamStateObservation | None:
             if domain == "raise.com":
                 msg = "simulated DB error"
                 raise RuntimeError(msg)
@@ -1057,13 +1469,13 @@ class TestStreamMonitorMetrics:
     ) -> None:
         """Record online stream status gauge."""
         owncast = _StubOwncastClient(
-            stream_state=StreamState(
+            stream_state=_stream_observation(
                 domain="live.com",
                 title="Title",
                 online=True,
-                status_since="2026-01-01T12:00:00+00:00",
+                observed_at="2026-01-01T12:00:00+00:00",
             ),
-            stream_config=StreamConfig(name="Live Stream"),
+            stream_config=StreamConfigObservation(name="Live Stream"),
         )
         client = _StubMatrixClient()
         monitor, _, metrics = _make_monitor_with_metrics(
@@ -1090,12 +1502,12 @@ class TestStreamMonitorMetrics:
     ) -> None:
         """Record offline stream status gauge."""
         owncast = _StubOwncastClient(
-            stream_state=StreamState(
+            stream_state=_stream_observation(
                 domain="off.com",
                 title="Title",
-                status_since="2026-01-01T12:00:00+00:00",
+                observed_at="2026-01-01T12:00:00+00:00",
             ),
-            stream_config=StreamConfig(name="Off Stream"),
+            stream_config=StreamConfigObservation(name="Off Stream"),
         )
         client = _StubMatrixClient()
         monitor, _, metrics = _make_monitor_with_metrics(
@@ -1146,12 +1558,12 @@ class TestStreamMonitorMetrics:
     ) -> None:
         """Reset failure counter gauge to zero on successful check."""
         owncast = _StubOwncastClient(
-            stream_state=StreamState(
+            stream_state=_stream_observation(
                 domain="recover.com",
                 title="Title",
-                status_since="2026-01-01T12:00:00+00:00",
+                observed_at="2026-01-01T12:00:00+00:00",
             ),
-            stream_config=StreamConfig(name="Recover"),
+            stream_config=StreamConfigObservation(name="Recover"),
         )
         client = _StubMatrixClient()
         monitor, _, metrics = _make_monitor_with_metrics(
@@ -1228,12 +1640,12 @@ class TestStreamMonitorMetrics:
     ) -> None:
         """Record per-domain subscription counts after update_all_streams."""
         owncast = _StubOwncastClient(
-            stream_state=StreamState(
+            stream_state=_stream_observation(
                 domain="pop.com",
                 online=True,
-                status_since="2026-01-01T00:00:00+00:00",
+                observed_at="2026-01-01T00:00:00+00:00",
             ),
-            stream_config=StreamConfig(name="Popular"),
+            stream_config=StreamConfigObservation(name="Popular"),
         )
         client = _StubMatrixClient()
         monitor, _, metrics = _make_monitor_with_metrics(

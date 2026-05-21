@@ -78,7 +78,7 @@ def _format_duration(timestamp_str: str, now: datetime) -> str:
         if seconds < _SECONDS_PER_DAY:
             hours = seconds // _SECONDS_PER_HOUR
             return f"{hours} hour{'s' if hours != 1 else ''}"
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return "unknown duration"
     else:
         days = seconds // _SECONDS_PER_DAY

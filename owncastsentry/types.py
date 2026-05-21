@@ -14,7 +14,7 @@
 
 """Data containers and domain errors for OwncastSentry."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
@@ -80,6 +80,11 @@ def format_status_since(timestamp: datetime) -> str:
     return timestamp.astimezone(UTC).isoformat(timespec="seconds")
 
 
+def _current_observed_at() -> str:
+    """Return the current UTC time in the package's timestamp format."""
+    return format_status_since(datetime.now(UTC))
+
+
 class StreamStatus(Enum):
     """Represents the status of a stream."""
 
@@ -89,8 +94,50 @@ class StreamStatus(Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class StreamStateObservation:
+    """Status API sample fetched from an Owncast instance.
+
+    This records what `/api/status` reported during one request. `observed_at`
+    belongs to that fetch; the monitor decides whether that time starts a new
+    persisted online/offline period in `StreamState`.
+    """
+
+    domain: str
+    title: str | None = None
+    online: bool = False
+    observed_at: str = field(default_factory=_current_observed_at)
+
+    @classmethod
+    def from_api_response(
+        cls, response: dict[str, Any], domain: str
+    ) -> StreamStateObservation:
+        """Create a StreamStateObservation from a status API response.
+
+        :param response: API response as a dictionary (camelCase keys).
+        :param domain: The stream domain.
+        :return: StreamStateObservation instance.
+        :raises InvalidApiResponseError: If the response shape is invalid.
+        """
+        stream_title = _require_str(response, "streamTitle")
+        online = _require_field(response, "online")
+        if not isinstance(online, bool):
+            raise InvalidApiResponseError("online must be a boolean")
+
+        return cls(
+            domain=domain,
+            title=_truncate(stream_title, _MAX_STREAM_TITLE_LENGTH),
+            online=online,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class StreamState:
-    """Represents the state of an Owncast stream."""
+    """Stream record remembered by the repository.
+
+    States include persisted display data, the current online/offline period,
+    and failure counters used to derive user-facing status. `status_since`
+    records when the persisted online/offline period began.
+    """
 
     domain: str
     name: str | None = None
@@ -113,30 +160,6 @@ class StreamState:
         return StreamStatus.OFFLINE
 
     @classmethod
-    def from_api_response(
-        cls, response: dict[str, Any], domain: str, observed_at: datetime
-    ) -> StreamState:
-        """Create a StreamState from an API response.
-
-        :param response: API response as a dictionary (camelCase keys).
-        :param domain: The stream domain.
-        :param observed_at: Local time when this status was observed.
-        :return: StreamState instance.
-        :raises InvalidApiResponseError: If the response shape is invalid.
-        """
-        stream_title = _require_str(response, "streamTitle")
-        online = _require_field(response, "online")
-        if not isinstance(online, bool):
-            raise InvalidApiResponseError("online must be a boolean")
-
-        return cls(
-            domain=domain,
-            title=_truncate(stream_title, _MAX_STREAM_TITLE_LENGTH),
-            online=online,
-            status_since=format_status_since(observed_at),
-        )
-
-    @classmethod
     def from_db_row(cls, row: dict[str, Any]) -> StreamState:
         """Create a StreamState from a database row.
 
@@ -154,18 +177,24 @@ class StreamState:
 
 
 @dataclass(frozen=True, slots=True)
-class StreamConfig:
-    """Represents the configuration of an Owncast stream."""
+class StreamConfigObservation:
+    """Config API sample fetched from an Owncast instance.
+
+    This records display metadata from one `/api/config` request. It is used for
+    notification text and may refresh persisted display fields independently of
+    the stream's online/offline state.
+    """
 
     name: str = ""
     tags: tuple[str, ...] = ()
+    observed_at: str = field(default_factory=_current_observed_at)
 
     @classmethod
-    def from_api_response(cls, response: dict[str, Any]) -> StreamConfig:
-        """Create a StreamConfig from an API response.
+    def from_api_response(cls, response: dict[str, Any]) -> StreamConfigObservation:
+        """Create a StreamConfigObservation from an API response.
 
         :param response: API response as a dictionary.
-        :return: StreamConfig instance.
+        :return: StreamConfigObservation instance.
         :raises InvalidApiResponseError: If the response shape is invalid.
         """
         # Apply Owncast's instance name limit.

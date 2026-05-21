@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Repository and schema upgrade definitions for OwncastSentry."""
+"""Repository and schema upgrade definitions for OwncastSentry.
+
+Only SQLite is supported as a database backend for now.
+"""
 
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -35,9 +38,13 @@ if TYPE_CHECKING:
 upgrade_table = UpgradeTable()
 
 
-def _has_legacy_timestamp(value: Any) -> bool:
-    """Return whether a legacy timestamp value carries usable content."""
-    return value is not None and str(value).strip() != ""
+class _Unset:
+    """Sentinel type for omitted partial stream update fields."""
+
+    __slots__ = ()
+
+
+_UNSET = _Unset()
 
 
 def _normalize_legacy_status_since(value: Any) -> str | None:
@@ -165,10 +172,9 @@ async def upgrade_v4(conn: Connection) -> None:
            FROM streams"""
     )
     for row in rows:
-        online = _has_legacy_timestamp(row["last_connect_time"])
-        legacy_timestamp = (
-            row["last_connect_time"] if online else row["last_disconnect_time"]
-        )
+        last_connect_time = row["last_connect_time"]
+        online = last_connect_time is not None and str(last_connect_time).strip() != ""
+        legacy_timestamp = last_connect_time if online else row["last_disconnect_time"]
         await conn.execute(
             """INSERT INTO streams_new (
                    domain, name, title, online, status_since, failure_counter
@@ -234,25 +240,63 @@ class StreamRepository:
         result = await self.get_by_domain(domain)
         return result is not None
 
-    async def update(self, state: StreamState) -> None:
-        """Update a stream's state in the database.
+    async def update(
+        self,
+        domain: str,
+        *,
+        name: str | None | _Unset = _UNSET,
+        title: str | None | _Unset = _UNSET,
+        online: bool | _Unset = _UNSET,
+        status_since: str | None | _Unset = _UNSET,
+    ) -> None:
+        """Update only the supplied stream fields in the database.
 
-        This updates display/state fields only. Failure counters are
-        updated through dedicated methods.
+        Passing None writes NULL for nullable fields. Omitting a field leaves
+        that column unchanged.
 
-        :param state: The StreamState to save.
+        :param domain: The stream domain.
+        :param name: Optional stream display name update.
+        :param title: Optional stream title update.
+        :param online: Optional stream online state update.
+        :param status_since: Optional current status timestamp update.
         """
+        # _UNSET marks omitted fields so None can still be written as SQL NULL.
+        update_name = not isinstance(name, _Unset)
+        update_title = not isinstance(title, _Unset)
+        update_online = not isinstance(online, _Unset)
+        update_status_since = not isinstance(status_since, _Unset)
+
+        if not (update_name or update_title or update_online or update_status_since):
+            return
+
+        name_value = None if isinstance(name, _Unset) else name
+        title_value = None if isinstance(title, _Unset) else title
+        online_value = None if isinstance(online, _Unset) else online
+        status_since_value = None if isinstance(status_since, _Unset) else status_since
+
+        # SQLite's IS NOT gives null-safe comparisons for the supported backend.
         query = """UPDATE streams
-                   SET name=$1, title=$2, online=$3, status_since=$4
-                   WHERE domain=$5"""
+                   SET name = CASE WHEN $1 THEN $2 ELSE name END,
+                       title = CASE WHEN $3 THEN $4 ELSE title END,
+                       online = CASE WHEN $5 THEN $6 ELSE online END,
+                       status_since = CASE WHEN $7 THEN $8 ELSE status_since END
+                   WHERE domain=$9
+                     AND (($1 AND name IS NOT $2)
+                          OR ($3 AND title IS NOT $4)
+                          OR ($5 AND online IS NOT $6)
+                          OR ($7 AND status_since IS NOT $8))"""
         async with self.db.acquire() as conn:
             await conn.execute(
                 query,
-                state.name,
-                state.title,
-                state.online,
-                state.status_since,
-                state.domain,
+                update_name,
+                name_value,
+                update_title,
+                title_value,
+                update_online,
+                online_value,
+                update_status_since,
+                status_since_value,
+                domain,
             )
 
     async def delete(self, domain: str) -> None:

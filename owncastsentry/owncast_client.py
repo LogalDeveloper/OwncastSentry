@@ -15,13 +15,16 @@
 """HTTP client for querying Owncast instance APIs."""
 
 import json
-from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
 
-from .types import InvalidApiResponseError, StreamConfig, StreamState
+from .types import (
+    InvalidApiResponseError,
+    StreamConfigObservation,
+    StreamStateObservation,
+)
 
 if TYPE_CHECKING:
     import logging
@@ -110,14 +113,14 @@ class OwncastClient:
             connector=connector,
         )
 
-    async def get_stream_state(self, domain: str) -> StreamState | None:
+    async def get_stream_state(self, domain: str) -> StreamStateObservation | None:
         """Get the current stream state for a given domain.
 
         HTTPS on port 443 is assumed, no other protocols or ports
         are supported.
 
         :param domain: The domain (not URL) where the stream is hosted.
-        :return: A StreamState if available, None on error.
+        :return: A StreamStateObservation if available, None on error.
         """
         self.log.debug("[%s] Fetching current stream state...", domain)
         with self.metrics.response_timer(domain) as timer:
@@ -126,10 +129,9 @@ class OwncastClient:
             if new_state is None:
                 return None
 
-            observed_at = datetime.now(UTC)
             try:
-                stream_state = StreamState.from_api_response(
-                    new_state, domain, observed_at
+                stream_observation = StreamStateObservation.from_api_response(
+                    new_state, domain
                 )
             except InvalidApiResponseError as e:
                 self.log.warning(
@@ -142,16 +144,16 @@ class OwncastClient:
                 return None
 
             timer.success()
-            return stream_state
+            return stream_observation
 
-    async def get_stream_config(self, domain: str) -> StreamConfig | None:
+    async def get_stream_config(self, domain: str) -> StreamConfigObservation | None:
         """Get the current stream config for a given domain.
 
         HTTPS on port 443 is assumed, no other protocols or ports
         are supported.
 
         :param domain: The domain (not URL) where the stream is hosted.
-        :return: A StreamConfig, or None if fetch failed.
+        :return: A StreamConfigObservation, or None if fetch failed.
         """
         self.log.debug("[%s] Fetching current stream config...", domain)
         with self.metrics.response_timer(domain) as timer:
@@ -160,7 +162,7 @@ class OwncastClient:
                 return None
 
             try:
-                stream_config = StreamConfig.from_api_response(config)
+                stream_config = StreamConfigObservation.from_api_response(config)
             except InvalidApiResponseError as e:
                 self.log.warning(
                     "[%s] Rejecting response to request on %s as response "

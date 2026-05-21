@@ -23,6 +23,9 @@ from prometheus_client import CollectorRegistry, Counter, Gauge, Info
 
 from .types import StreamStatus
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Generator
+
 
 class NotificationType(StrEnum):
     """Notification type labels for the delivery counter."""
@@ -39,9 +42,6 @@ class ErrorSource(StrEnum):
     SCHEDULER_LOOP = "scheduler_loop"
     COMMAND = "command"
 
-
-if TYPE_CHECKING:
-    from collections.abc import Callable, Generator
 
 # Mapping from StreamStatus enum to numeric gauge values
 _STATUS_VALUES: dict[StreamStatus, float] = {

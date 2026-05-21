@@ -148,13 +148,13 @@ class TestReadLimitedResponseBody:
 
 
 class TestGetStreamState:
-    """Stream state retrieval from the status API."""
+    """Stream observation retrieval from the status API."""
 
     @time_machine.travel(datetime(2026, 3, 13, 12, 0, 0, tzinfo=UTC))
     async def test_returns_state_on_success(
         self, owncast_client: OwncastClient
     ) -> None:
-        """Return a StreamState with correct fields on a valid 200 response."""
+        """Return a StreamStateObservation with correct fields on a valid response."""
         with aioresponses() as mocked:
             mocked.get(
                 "https://stream.logal.dev/api/status",
@@ -169,7 +169,7 @@ class TestGetStreamState:
             == "I think I can do this... Let's start a nuclear reaction - Playing Nucleares!"  # noqa: E501
         )
         assert result.online is False
-        assert result.status_since == "2026-03-13T12:00:00+00:00"
+        assert result.observed_at == "2026-03-13T12:00:00+00:00"
 
     async def test_returns_none_on_missing_field(
         self, owncast_client: OwncastClient
@@ -272,7 +272,7 @@ class TestGetStreamConfig:
     async def test_returns_config_on_success(
         self, owncast_client: OwncastClient
     ) -> None:
-        """Return a StreamConfig with correct fields on a valid 200 response."""
+        """Return a StreamConfigObservation with fields from a valid response."""
         with aioresponses() as mocked:
             mocked.get(
                 "https://stream.logal.dev/api/config",

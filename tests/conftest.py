@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from mautrix.util.config import BaseProxyConfig
 
     from owncastsentry.metrics import MetricsService
-    from owncastsentry.types import StreamConfig, StreamState
+    from owncastsentry.types import StreamConfigObservation, StreamStateObservation
 
 
 def generate_metrics_output(metrics: MetricsService) -> str:
@@ -212,19 +212,19 @@ class _StubMatrixClient:
 class _StubOwncastClient:
     """Configurable stub for the Owncast HTTP client."""
 
-    stream_state: StreamState | None = None
-    stream_config: StreamConfig | None = None
+    stream_state: StreamStateObservation | None = None
+    stream_config: StreamConfigObservation | None = None
     state_call_count: int = field(default=0, init=False)
     config_call_count: int = field(default=0, init=False)
     queried_domains: list[str] = field(default_factory=list, init=False)
 
-    async def get_stream_state(self, domain: str) -> StreamState | None:
-        """Return the configured stream state."""
+    async def get_stream_state(self, domain: str) -> StreamStateObservation | None:
+        """Return the configured stream observation."""
         self.state_call_count += 1
         self.queried_domains.append(domain)
         return self.stream_state
 
-    async def get_stream_config(self, _domain: str) -> StreamConfig | None:
+    async def get_stream_config(self, _domain: str) -> StreamConfigObservation | None:
         """Return the configured stream config."""
         self.config_call_count += 1
         return self.stream_config

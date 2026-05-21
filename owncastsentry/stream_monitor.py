@@ -16,9 +16,18 @@
 
 import asyncio
 import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import Enum, auto
 from typing import TYPE_CHECKING
 
-from .types import StreamState, UpdateResult
+from .types import (
+    StreamConfigObservation,
+    StreamState,
+    StreamStateObservation,
+    StreamStatus,
+    UpdateResult,
+)
 
 if TYPE_CHECKING:
     import logging
@@ -54,6 +63,102 @@ def _should_query_stream(failure_counter: int) -> bool:
     if failure_counter <= _QUERY_EVERY_5_MINUTES_FAILURE_LIMIT:
         return failure_counter % _QUERY_EVERY_5_MINUTES_INTERVAL == 0
     return failure_counter % _QUERY_EVERY_15_MINUTES_INTERVAL == 0
+
+
+class _StreamTransitionKind(Enum):
+    """High-level status transition from stored state to fresh observation."""
+
+    FIRST_OBSERVATION = auto()
+    WENT_LIVE = auto()
+    WENT_OFFLINE = auto()
+    TITLE_CHANGED = auto()
+    STATUS_UNCHANGED = auto()
+
+
+@dataclass(frozen=True, slots=True)
+class _StreamTransition:
+    """Classified stream transition and timestamp metadata."""
+
+    kind: _StreamTransitionKind
+    status_since: str | None
+
+
+class _NotificationKind(Enum):
+    """Live/title notification action for a transition."""
+
+    NONE = auto()
+    LIVE = auto()
+    TITLE_CHANGE = auto()
+
+    @property
+    def should_notify(self) -> bool:
+        """Return whether a live/title-change notification should be attempted."""
+        return self is not _NotificationKind.NONE
+
+
+def _classify_transition(
+    old_state: StreamState, observation: StreamStateObservation
+) -> _StreamTransition:
+    """Classify the transition from the stored state to the latest observation."""
+    if old_state.status_since is None:
+        return _StreamTransition(
+            kind=_StreamTransitionKind.FIRST_OBSERVATION,
+            status_since=observation.observed_at,
+        )
+
+    if old_state.online != observation.online:
+        return _StreamTransition(
+            kind=(
+                _StreamTransitionKind.WENT_LIVE
+                if observation.online
+                else _StreamTransitionKind.WENT_OFFLINE
+            ),
+            status_since=observation.observed_at,
+        )
+
+    if old_state.online and old_state.title != observation.title:
+        return _StreamTransition(
+            kind=_StreamTransitionKind.TITLE_CHANGED,
+            status_since=old_state.status_since,
+        )
+
+    return _StreamTransition(
+        kind=_StreamTransitionKind.STATUS_UNCHANGED,
+        status_since=old_state.status_since,
+    )
+
+
+def _classify_notification(
+    transition: _StreamTransition,
+    old_state: StreamState,
+    observation: StreamStateObservation,
+    *,
+    offline_duration_seconds: int | None = None,
+    went_offline_after_last_notification: bool = False,
+) -> _NotificationKind:
+    """Classify the live/title notification policy for a transition.
+
+    The caller supplies timing context because it comes from the monitor's
+    monotonic offline cache and notification-service cache, not the transition.
+    """
+    match transition.kind:
+        case _StreamTransitionKind.WENT_LIVE:
+            if offline_duration_seconds is not None and (
+                offline_duration_seconds < _TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN
+            ):
+                if old_state.title != observation.title:
+                    return _NotificationKind.TITLE_CHANGE
+                return _NotificationKind.NONE
+
+            return _NotificationKind.LIVE
+
+        case _StreamTransitionKind.TITLE_CHANGED:
+            if went_offline_after_last_notification:
+                return _NotificationKind.LIVE
+            return _NotificationKind.TITLE_CHANGE
+
+        case _:
+            return _NotificationKind.NONE
 
 
 class StreamMonitor:
@@ -178,22 +283,11 @@ class StreamMonitor:
             # Backoff is expected behavior, not a failure
             return True
 
-        # Flag: no status timestamp has been recorded yet, so suppress
-        # notifications for a stream's first observed state.
-        first_update = False
-
-        # Flag: whether to update the stream's state in the database.
-        # Used to avoid writes when state hasn't changed at all.
-        update_database = False
-
-        # The stream's latest configuration, if fetched during update.
-        stream_config = None
-
         # Fetch the latest stream state from the server
-        new_state = await self.owncast_client.get_stream_state(domain)
+        observation = await self.owncast_client.get_stream_state(domain)
 
         # If the fetch failed, increment failure counter and skip the update
-        if new_state is None:
+        if observation is None:
             await self.stream_repo.increment_failure_counter(domain)
             self.log.warning(
                 "[%s] Connection failure (counter=%s)",
@@ -216,138 +310,108 @@ class StreamMonitor:
         # Initialize timer cache entries to prevent KeyError on first access
         self.offline_timer_cache.setdefault(domain, 0)
 
-        if old_state.status_since is None:
-            # No stream history has been recorded yet. Don't send notifications.
-            update_database = True
-            first_update = True
+        transition = _classify_transition(old_state, observation)
+        # Notification policy may need runtime timing context in addition to
+        # the stored state and latest observation.
+        offline_duration_seconds: int | None = None
+        went_offline_after_last_notification = False
 
-        if first_update:
-            self.log.info(
-                "[%s] Not sending notifications. This is the first state "
-                "update for this stream.",
-                domain,
-            )
-
-        # Did the stream become publicly online?
-        elif new_state.online and not old_state.online:
-            # Yes! This stream is now live.
-            update_database = True
-            stream_config = await self.owncast_client.get_stream_config(domain)
-
-            self.log.info("[%s] Stream is now live!", domain)
-
-            # Calculate seconds since the stream last went offline
-            seconds_since_last_offline = round(
-                time.monotonic() - self.offline_timer_cache[domain]
-            )
-
-            # Use fallback values if config fetch failed
-            stream_name = stream_config.name if stream_config else domain
-            stream_tags = stream_config.tags if stream_config else ()
-
-            # Has this stream been offline for a short time?
-            if seconds_since_last_offline < _TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN:
-                # Did the stream title change?
-                if old_state.title != new_state.title:
-                    # Stream was briefly down; send title change notification.
-                    await self.notification_service.notify_stream_live(
-                        domain,
-                        stream_name,
-                        new_state.title or "",
-                        stream_tags,
-                        title_change=True,
-                    )
-                else:
-                    # Briefly offline, no title change. Skip.
+        match transition.kind:
+            case _StreamTransitionKind.FIRST_OBSERVATION:
+                self.log.info(
+                    "[%s] Not sending notifications. This is the first state "
+                    "update for this stream.",
+                    domain,
+                )
+            case _StreamTransitionKind.WENT_LIVE:
+                self.log.info("[%s] Stream is now live!", domain)
+                offline_duration_seconds = round(
+                    time.monotonic() - self.offline_timer_cache[domain]
+                )
+                # Brief reconnects with the same title are treated as transient
+                # outages, not new live events.
+                if (
+                    offline_duration_seconds < _TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN
+                    and old_state.title == observation.title
+                ):
                     self.log.info(
-                        "[%s] Not sending notifications. Stream was only "
-                        "offline for %s of %s seconds and did not change "
-                        "its title.",
+                        "[%s] Not sending notifications. Stream was only offline for "
+                        "%s of %s seconds and did not change its title.",
                         domain,
-                        seconds_since_last_offline,
+                        offline_duration_seconds,
                         _TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN,
                     )
-            else:
-                # Offline for a while. Send a normal notification.
-                await self.notification_service.notify_stream_live(
-                    domain,
-                    stream_name,
-                    new_state.title or "",
-                    stream_tags,
-                    title_change=False,
-                )
-
-        elif new_state.online and old_state.online:
-            # Did the stream title change mid-session?
-            if old_state.title != new_state.title:
+            case _StreamTransitionKind.TITLE_CHANGED:
                 self.log.info("[%s] Stream title was changed!", domain)
-                update_database = True
-                stream_config = await self.owncast_client.get_stream_config(domain)
-
-                # Use fallback values if config fetch failed
-                stream_name = stream_config.name if stream_config else domain
-                stream_tags = stream_config.tags if stream_config else ()
-
-                # If the offline marker is newer than the last recorded
-                # notification, send a regular go-live instead of a title
-                # change to avoid confusion.
-                if self.offline_timer_cache[
+                # If we saw an offline event after the last notification, send
+                # a go-live notice instead of only a title-change notice.
+                went_offline_after_last_notification = self.offline_timer_cache[
                     domain
-                ] > self.notification_service.get_last_notification_time(domain):
-                    await self.notification_service.notify_stream_live(
-                        domain,
-                        stream_name,
-                        new_state.title or "",
-                        stream_tags,
-                        title_change=False,
-                    )
-                else:
-                    # No. Send a normal title change notification.
-                    await self.notification_service.notify_stream_live(
-                        domain,
-                        stream_name,
-                        new_state.title or "",
-                        stream_tags,
-                        title_change=True,
-                    )
+                ] > self.notification_service.get_last_notification_time(domain)
+            case _StreamTransitionKind.WENT_OFFLINE:
+                self.offline_timer_cache[domain] = time.monotonic()
+                self.log.info("[%s] Stream is now offline.", domain)
+            case _StreamTransitionKind.STATUS_UNCHANGED:
+                pass
 
-        # Did the stream go offline?
-        elif not new_state.online and old_state.online:
-            # Yep. This stream is now offline. Log it.
-            update_database = True
-            self.offline_timer_cache[domain] = time.monotonic()
-            self.log.info("[%s] Stream is now offline.", domain)
+        notification_kind = _classify_notification(
+            transition,
+            old_state,
+            observation,
+            offline_duration_seconds=offline_duration_seconds,
+            went_offline_after_last_notification=went_offline_after_last_notification,
+        )
 
-        # Update the database with current stream state, if needed.
-        if update_database:
-            # Ensure we have the stream config before updating
-            if stream_config is None:
-                stream_config = await self.owncast_client.get_stream_config(domain)
+        stream_config: StreamConfigObservation | None = None
+        observed_at = datetime.fromisoformat(observation.observed_at)
+        hourly_config_refresh_due = (
+            observed_at.tzinfo is not None and observed_at.astimezone(UTC).minute == 0
+        )
+        should_fetch_config = (
+            notification_kind.should_notify
+            or transition.kind is _StreamTransitionKind.FIRST_OBSERVATION
+            or hourly_config_refresh_due
+        )
+        if should_fetch_config:
+            stream_config = await self.owncast_client.get_stream_config(domain)
 
-            # Use fallback value if config fetch failed
-            stream_name = stream_config.name if stream_config else ""
+        if notification_kind.should_notify:
+            stream_name = stream_config.name if stream_config else domain
+            stream_tags = stream_config.tags if stream_config else ()
+            is_title_change = notification_kind is _NotificationKind.TITLE_CHANGE
 
-            self.log.debug("[%s] Updating stream state in database...", domain)
-
-            if first_update or old_state.online != new_state.online:
-                status_since = new_state.status_since
-            else:
-                status_since = old_state.status_since
-
-            # Create updated state object (title already truncated in new_state)
-            updated_state = StreamState(
-                domain=domain,
-                name=stream_name,
-                title=new_state.title,
-                online=new_state.online,
-                status_since=status_since,
+            await self.notification_service.notify_stream_live(
+                domain,
+                stream_name,
+                observation.title or "",
+                stream_tags,
+                title_change=is_title_change,
             )
 
-            await self.stream_repo.update(updated_state)
+        self.log.debug("[%s] Saving stream state if changed...", domain)
+
+        if stream_config is not None:
+            await self.stream_repo.update(
+                domain,
+                name=stream_config.name,
+                title=observation.title,
+                online=observation.online,
+                status_since=transition.status_since,
+            )
+        else:
+            await self.stream_repo.update(
+                domain,
+                title=observation.title,
+                online=observation.online,
+                status_since=transition.status_since,
+            )
 
         # All done.
         self.log.debug("[%s] State update completed.", domain)
-        self.metrics.set_stream_status(domain, new_state.status)
+        stream_status = (
+            StreamStatus.ONLINE if observation.online else StreamStatus.OFFLINE
+        )
+        self.metrics.set_stream_status(domain, stream_status)
         return True
 
     async def _check_cleanup_thresholds(self, domain: str, counter: int) -> None:

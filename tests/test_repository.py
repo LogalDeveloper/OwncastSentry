@@ -23,7 +23,6 @@ from owncastsentry.types import (
     UNKNOWN_STATUS_THRESHOLD,
     AlreadySubscribedError,
     NotSubscribedError,
-    StreamState,
 )
 
 if TYPE_CHECKING:
@@ -129,6 +128,70 @@ class TestStreamDelete:
         assert await stream_repo.get_by_domain("example.com") is None
 
 
+class TestStreamUpdate:
+    """Partial stream state updates."""
+
+    async def test_updates_only_supplied_fields(
+        self, stream_repo: StreamRepository
+    ) -> None:
+        """Update supplied fields while leaving omitted fields unchanged."""
+        await stream_repo.create("example.com")
+        await stream_repo.update(
+            "example.com",
+            name="Original Name",
+            title="Original Title",
+            online=True,
+            status_since="2026-01-01T12:00:00+00:00",
+        )
+
+        await stream_repo.update("example.com", title="Updated Title")
+
+        state = await stream_repo.get_by_domain("example.com")
+        assert state is not None
+        assert state.name == "Original Name"
+        assert state.title == "Updated Title"
+        assert state.online is True
+        assert state.status_since == "2026-01-01T12:00:00+00:00"
+
+    async def test_can_set_nullable_field_to_null(
+        self, stream_repo: StreamRepository
+    ) -> None:
+        """Treat None as a supplied NULL value, not an omitted field."""
+        await stream_repo.create("example.com")
+        await stream_repo.update(
+            "example.com",
+            name="Original Name",
+            title="Original Title",
+            status_since="2026-01-01T12:00:00+00:00",
+        )
+
+        await stream_repo.update("example.com", title=None)
+
+        state = await stream_repo.get_by_domain("example.com")
+        assert state is not None
+        assert state.name == "Original Name"
+        assert state.title is None
+        assert state.status_since == "2026-01-01T12:00:00+00:00"
+
+    async def test_accepts_no_supplied_fields(
+        self, stream_repo: StreamRepository
+    ) -> None:
+        """Leave the row unchanged when no partial fields are supplied."""
+        await stream_repo.create("example.com")
+        await stream_repo.update(
+            "example.com",
+            title="Original Title",
+            status_since="2026-01-01T12:00:00+00:00",
+        )
+
+        await stream_repo.update("example.com")
+
+        state = await stream_repo.get_by_domain("example.com")
+        assert state is not None
+        assert state.title == "Original Title"
+        assert state.status_since == "2026-01-01T12:00:00+00:00"
+
+
 class TestGetSubscribedStreamsForRoom:
     """Subscribed stream lookup by room."""
 
@@ -186,9 +249,9 @@ class TestGetRoomSubscriptions:
     ) -> None:
         """Return sorted resolved subscriptions and skip missing stream rows."""
         await stream_repo.create("beta.example")
-        await stream_repo.update(StreamState(domain="beta.example", name="Beta"))
+        await stream_repo.update("beta.example", name="Beta")
         await stream_repo.create("alpha.example")
-        await stream_repo.update(StreamState(domain="alpha.example", name="Alpha"))
+        await stream_repo.update("alpha.example", name="Alpha")
         await subscription_repo.add("beta.example", "!room:example.com")
         await subscription_repo.add("missing.example", "!room:example.com")
         await subscription_repo.add("alpha.example", "!room:example.com")
@@ -227,29 +290,23 @@ class TestGetLiveRoomSubscriptions:
         """Return only streams whose derived status is ONLINE."""
         await stream_repo.create("offline.example")
         await stream_repo.update(
-            StreamState(
-                domain="offline.example",
-                name="Offline",
-                status_since="2026-01-01T00:00:00+00:00",
-            )
+            "offline.example",
+            name="Offline",
+            status_since="2026-01-01T00:00:00+00:00",
         )
         await stream_repo.create("online.example")
         await stream_repo.update(
-            StreamState(
-                domain="online.example",
-                name="Online",
-                online=True,
-                status_since="2026-01-01T00:00:00+00:00",
-            )
+            "online.example",
+            name="Online",
+            online=True,
+            status_since="2026-01-01T00:00:00+00:00",
         )
         await stream_repo.create("unknown.example")
         await stream_repo.update(
-            StreamState(
-                domain="unknown.example",
-                name="Unknown",
-                online=True,
-                status_since="2026-01-01T00:00:00+00:00",
-            )
+            "unknown.example",
+            name="Unknown",
+            online=True,
+            status_since="2026-01-01T00:00:00+00:00",
         )
         for _ in range(UNKNOWN_STATUS_THRESHOLD + 1):
             await stream_repo.increment_failure_counter("unknown.example")

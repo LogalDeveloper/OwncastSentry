@@ -18,6 +18,7 @@ from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
+import time_machine
 
 from owncastsentry.types import (
     _MAX_INSTANCE_TITLE_LENGTH,
@@ -29,8 +30,9 @@ from owncastsentry.types import (
     InvalidOwncastInstanceError,
     NotSubscribedError,
     RoomSubscription,
-    StreamConfig,
+    StreamConfigObservation,
     StreamState,
+    StreamStateObservation,
     StreamStatus,
     SubscriptionError,
     UpdateResult,
@@ -140,29 +142,29 @@ class TestFormatStatusSince:
         assert format_status_since(timestamp) == "2026-01-01T12:34:56+00:00"
 
 
-class TestStreamStateFromApiResponse:
-    """StreamState construction from an API response dictionary."""
+class TestStreamStateObservationFromApiResponse:
+    """StreamStateObservation construction from an API response dictionary."""
 
     def test_typical_response(self) -> None:
-        """Populate API-derived fields from a complete stream state response."""
+        """Populate API-derived fields from a complete status response."""
         observed_at = datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC)
         response = {
             "streamTitle": "My Stream",
             "online": True,
         }
-        state = StreamState.from_api_response(response, "example.com", observed_at)
-        assert state.domain == "example.com"
-        assert state.title == "My Stream"
-        assert state.online is True
-        assert state.status_since == "2026-01-01T00:00:01+00:00"
-        assert state.name is None
-        assert state.failure_counter == 0
+        with time_machine.travel(observed_at, tick=False):
+            observation = StreamStateObservation.from_api_response(
+                response, "example.com"
+            )
+        assert observation.domain == "example.com"
+        assert observation.title == "My Stream"
+        assert observation.online is True
+        assert observation.observed_at == "2026-01-01T00:00:01+00:00"
 
     def test_missing_required_field_raises(self) -> None:
         """Reject API responses without required stream state fields."""
-        observed_at = datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC)
         with pytest.raises(InvalidApiResponseError):
-            StreamState.from_api_response({}, "bare.example.com", observed_at)
+            StreamStateObservation.from_api_response({}, "bare.example.com")
 
     def test_offline_response(self) -> None:
         """Populate offline state from a status response."""
@@ -171,9 +173,12 @@ class TestStreamStateFromApiResponse:
             "streamTitle": "Offline Stream",
             "online": False,
         }
-        state = StreamState.from_api_response(response, "example.com", observed_at)
-        assert state.online is False
-        assert state.status_since == "2026-01-01T00:00:01+00:00"
+        with time_machine.travel(observed_at, tick=False):
+            observation = StreamStateObservation.from_api_response(
+                response, "example.com"
+            )
+        assert observation.online is False
+        assert observation.observed_at == "2026-01-01T00:00:01+00:00"
 
     def test_title_truncation(self) -> None:
         """Truncate the stream title to _MAX_STREAM_TITLE_LENGTH."""
@@ -183,9 +188,12 @@ class TestStreamStateFromApiResponse:
             "streamTitle": long_title,
             "online": True,
         }
-        state = StreamState.from_api_response(response, "example.com", observed_at)
-        assert len(state.title) == _MAX_STREAM_TITLE_LENGTH
-        assert state.title == "A" * _MAX_STREAM_TITLE_LENGTH
+        with time_machine.travel(observed_at, tick=False):
+            observation = StreamStateObservation.from_api_response(
+                response, "example.com"
+            )
+        assert len(observation.title) == _MAX_STREAM_TITLE_LENGTH
+        assert observation.title == "A" * _MAX_STREAM_TITLE_LENGTH
 
     @pytest.mark.parametrize(
         ("field", "value"),
@@ -196,7 +204,6 @@ class TestStreamStateFromApiResponse:
     )
     def test_invalid_field_type_raises(self, field: str, value: object) -> None:
         """Reject stream state responses with malformed field types."""
-        observed_at = datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC)
         response: dict[str, object] = {
             "streamTitle": "My Stream",
             "online": True,
@@ -204,7 +211,7 @@ class TestStreamStateFromApiResponse:
         response[field] = value
 
         with pytest.raises(InvalidApiResponseError):
-            StreamState.from_api_response(response, "example.com", observed_at)
+            StreamStateObservation.from_api_response(response, "example.com")
 
 
 class TestStreamStateFromDbRow:
@@ -247,19 +254,22 @@ class TestStreamStateFromDbRow:
         assert state.failure_counter == 0
 
 
-class TestStreamConfigFromApiResponse:
-    """StreamConfig construction from an API response dictionary."""
+class TestStreamConfigObservationFromApiResponse:
+    """StreamConfigObservation construction from an API response dictionary."""
 
     def test_typical_response(self) -> None:
         """Populate name and tags from a complete API response."""
         response = {"name": "My Instance", "tags": ["gaming", "music"]}
-        config = StreamConfig.from_api_response(response)
+        observed_at = datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC)
+        with time_machine.travel(observed_at, tick=False):
+            config = StreamConfigObservation.from_api_response(response)
         assert config.name == "My Instance"
         assert config.tags == ("gaming", "music")
+        assert config.observed_at == "2026-01-01T00:00:01+00:00"
 
     def test_missing_keys_defaults(self) -> None:
         """Use defaults when name and tags keys are missing."""
-        config = StreamConfig.from_api_response({})
+        config = StreamConfigObservation.from_api_response({})
         assert config.name == ""
         assert config.tags == ()
 
@@ -267,7 +277,7 @@ class TestStreamConfigFromApiResponse:
         """Truncate the instance name to _MAX_INSTANCE_TITLE_LENGTH."""
         long_name = "B" * (_MAX_INSTANCE_TITLE_LENGTH + 50)
         response = {"name": long_name, "tags": []}
-        config = StreamConfig.from_api_response(response)
+        config = StreamConfigObservation.from_api_response(response)
         assert len(config.name) == _MAX_INSTANCE_TITLE_LENGTH
         assert config.name == "B" * _MAX_INSTANCE_TITLE_LENGTH
 
@@ -275,7 +285,7 @@ class TestStreamConfigFromApiResponse:
         """Truncate each tag to _MAX_TAG_LENGTH."""
         long_tag = "C" * (_MAX_TAG_LENGTH + 10)
         response = {"name": "", "tags": [long_tag, "short"]}
-        config = StreamConfig.from_api_response(response)
+        config = StreamConfigObservation.from_api_response(response)
         assert len(config.tags[0]) == _MAX_TAG_LENGTH
         assert config.tags[0] == "C" * _MAX_TAG_LENGTH
         assert config.tags[1] == "short"
@@ -294,7 +304,7 @@ class TestStreamConfigFromApiResponse:
         response[field] = value
 
         with pytest.raises(InvalidApiResponseError):
-            StreamConfig.from_api_response(response)
+            StreamConfigObservation.from_api_response(response)
 
 
 class TestValueTypeImmutability:
@@ -306,15 +316,23 @@ class TestValueTypeImmutability:
         with pytest.raises(FrozenInstanceError):
             state.title = "Changed"  # type: ignore[misc]
 
+    def test_stream_observation_is_immutable(self) -> None:
+        """StreamStateObservation cannot be mutated in place."""
+        observation = StreamStateObservation(
+            domain="stream.example",
+        )
+        with pytest.raises(FrozenInstanceError):
+            observation.title = "Changed"  # type: ignore[misc]
+
     def test_stream_config_is_immutable(self) -> None:
-        """StreamConfig cannot be mutated in place."""
-        config = StreamConfig(name="Stream")
+        """StreamConfigObservation cannot be mutated in place."""
+        config = StreamConfigObservation(name="Stream")
         with pytest.raises(FrozenInstanceError):
             config.name = "Changed"  # type: ignore[misc]
 
     def test_stream_config_tags_are_immutable(self) -> None:
-        """StreamConfig tags are stored in an immutable tuple."""
-        config = StreamConfig(name="Stream", tags=("gaming",))
+        """StreamConfigObservation tags are stored in an immutable tuple."""
+        config = StreamConfigObservation(name="Stream", tags=("gaming",))
         assert config.tags == ("gaming",)
 
     def test_update_result_is_immutable(self) -> None:
