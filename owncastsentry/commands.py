@@ -78,7 +78,7 @@ def _format_duration(timestamp_str: str, now: datetime) -> str:
         if seconds < _SECONDS_PER_DAY:
             hours = seconds // _SECONDS_PER_HOUR
             return f"{hours} hour{'s' if hours != 1 else ''}"
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return "unknown duration"
     else:
         days = seconds // _SECONDS_PER_DAY
@@ -185,13 +185,15 @@ class CommandHandler:
 
             # Determine status and duration (as a sub-bullet)
             match stream_state.status:
-                case StreamStatus.ONLINE if stream_state.last_connect_time:
-                    duration = _format_duration(stream_state.last_connect_time, now)
+                case StreamStatus.ONLINE if stream_state.status_since:
+                    duration = _format_duration(stream_state.status_since, now)
                     parts.append(f"  - Status: Online for {duration}  \n")
+                case StreamStatus.ONLINE:
+                    parts.append("  - Status: Online  \n")
                 case StreamStatus.UNKNOWN:
                     parts.append("  - Status: Unknown (instance unreachable)  \n")
-                case StreamStatus.OFFLINE if stream_state.last_disconnect_time:
-                    duration = _format_duration(stream_state.last_disconnect_time, now)
+                case StreamStatus.OFFLINE if stream_state.status_since:
+                    duration = _format_duration(stream_state.status_since, now)
                     parts.append(f"  - Status: Offline for {duration}  \n")
                 case StreamStatus.OFFLINE:
                     parts.append("  - Status: Offline  \n")
@@ -255,9 +257,11 @@ class CommandHandler:
                 parts.append(f"  - Title: {safe_title}  \n")
 
             # Add status with duration
-            if stream_state.last_connect_time:
-                duration = _format_duration(stream_state.last_connect_time, now)
+            if stream_state.status_since:
+                duration = _format_duration(stream_state.status_since, now)
                 parts.append(f"  - Online for {duration}  \n")
+            else:
+                parts.append("  - Online  \n")
 
             # Add stream link
             parts.append(f"  - Link: https://{domain}\n\n")

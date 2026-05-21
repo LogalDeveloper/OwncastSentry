@@ -15,6 +15,7 @@
 """Tests for data models."""
 
 from dataclasses import FrozenInstanceError
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -34,6 +35,7 @@ from owncastsentry.types import (
     SubscriptionError,
     UpdateResult,
     _truncate,
+    format_status_since,
 )
 
 
@@ -58,59 +60,84 @@ class TestStreamStateStatus:
     """Stream status derivation from state fields."""
 
     @pytest.mark.parametrize(
-        ("failure_counter", "last_connect_time", "expected"),
+        ("failure_counter", "online", "expected"),
         [
             pytest.param(
                 UNKNOWN_STATUS_THRESHOLD + 1,
-                None,
+                False,
                 StreamStatus.UNKNOWN,
                 id="above-threshold-offline-returns-unknown",
             ),
             pytest.param(
                 UNKNOWN_STATUS_THRESHOLD + 1,
-                "2026-01-01T00:00:00Z",
+                True,
                 StreamStatus.UNKNOWN,
                 id="above-threshold-online-returns-unknown",
             ),
             pytest.param(
                 0,
-                "2026-01-01T00:00:00Z",
+                True,
                 StreamStatus.ONLINE,
-                id="zero-failures-with-connect-time-returns-online",
+                id="zero-failures-online-returns-online",
             ),
             pytest.param(
                 0,
-                None,
+                False,
                 StreamStatus.OFFLINE,
-                id="zero-failures-no-connect-time-returns-offline",
+                id="zero-failures-offline-returns-offline",
             ),
             pytest.param(
                 UNKNOWN_STATUS_THRESHOLD,
-                "2026-01-01T00:00:00Z",
+                True,
                 StreamStatus.ONLINE,
-                id="at-threshold-with-connect-time-returns-online",
+                id="at-threshold-online-returns-online",
             ),
             pytest.param(
                 UNKNOWN_STATUS_THRESHOLD,
-                None,
+                False,
                 StreamStatus.OFFLINE,
-                id="at-threshold-no-connect-time-returns-offline",
+                id="at-threshold-offline-returns-offline",
             ),
         ],
     )
     def test_status(
         self,
         failure_counter: int,
-        last_connect_time: str | None,
+        online: object,
         expected: StreamStatus,
     ) -> None:
-        """Return the correct status based on failure counter and connect time."""
+        """Return the correct status based on failure counter and online state."""
         state = StreamState(
             domain="example.com",
             failure_counter=failure_counter,
-            last_connect_time=last_connect_time,
+            online=online is True,
         )
         assert state.status is expected
+
+
+class TestFormatStatusSince:
+    """Status timestamp formatting."""
+
+    def test_formats_as_utc_iso_seconds(self) -> None:
+        """Normalize aware datetimes to UTC with second precision."""
+        timestamp = datetime(
+            2026,
+            1,
+            1,
+            12,
+            34,
+            56,
+            123456,
+            tzinfo=timezone(timedelta(hours=-5)),
+        )
+
+        assert format_status_since(timestamp) == "2026-01-01T17:34:56+00:00"
+
+    def test_treats_naive_as_utc(self) -> None:
+        """Format naive datetimes as UTC."""
+        timestamp = datetime.fromisoformat("2026-01-01T12:34:56.123456")
+
+        assert format_status_since(timestamp) == "2026-01-01T12:34:56+00:00"
 
 
 class TestStreamStateFromApiResponse:
@@ -118,47 +145,45 @@ class TestStreamStateFromApiResponse:
 
     def test_typical_response(self) -> None:
         """Populate API-derived fields from a complete stream state response."""
+        observed_at = datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC)
         response = {
             "streamTitle": "My Stream",
-            "lastConnectTime": "2026-01-01T00:00:00Z",
-            "lastDisconnectTime": "2025-12-31T23:00:00Z",
             "online": True,
         }
-        state = StreamState.from_api_response(response, "example.com")
+        state = StreamState.from_api_response(response, "example.com", observed_at)
         assert state.domain == "example.com"
         assert state.title == "My Stream"
-        assert state.last_connect_time == "2026-01-01T00:00:00Z"
-        assert state.last_disconnect_time == "2025-12-31T23:00:00Z"
+        assert state.online is True
+        assert state.status_since == "2026-01-01T00:00:01+00:00"
         assert state.name is None
         assert state.failure_counter == 0
 
     def test_missing_required_field_raises(self) -> None:
         """Reject API responses without required stream state fields."""
+        observed_at = datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC)
         with pytest.raises(InvalidApiResponseError):
-            StreamState.from_api_response({}, "bare.example.com")
+            StreamState.from_api_response({}, "bare.example.com", observed_at)
 
-    def test_nullable_timestamp_fields(self) -> None:
-        """Accept null values for Owncast timestamp fields."""
+    def test_offline_response(self) -> None:
+        """Populate offline state from a status response."""
+        observed_at = datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC)
         response = {
             "streamTitle": "Offline Stream",
-            "lastConnectTime": None,
-            "lastDisconnectTime": None,
             "online": False,
         }
-        state = StreamState.from_api_response(response, "example.com")
-        assert state.last_connect_time is None
-        assert state.last_disconnect_time is None
+        state = StreamState.from_api_response(response, "example.com", observed_at)
+        assert state.online is False
+        assert state.status_since == "2026-01-01T00:00:01+00:00"
 
     def test_title_truncation(self) -> None:
         """Truncate the stream title to _MAX_STREAM_TITLE_LENGTH."""
+        observed_at = datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC)
         long_title = "A" * (_MAX_STREAM_TITLE_LENGTH + 50)
         response = {
             "streamTitle": long_title,
-            "lastConnectTime": None,
-            "lastDisconnectTime": None,
             "online": True,
         }
-        state = StreamState.from_api_response(response, "example.com")
+        state = StreamState.from_api_response(response, "example.com", observed_at)
         assert len(state.title) == _MAX_STREAM_TITLE_LENGTH
         assert state.title == "A" * _MAX_STREAM_TITLE_LENGTH
 
@@ -166,27 +191,20 @@ class TestStreamStateFromApiResponse:
         ("field", "value"),
         [
             pytest.param("streamTitle", 123, id="title-not-string"),
-            pytest.param("lastConnectTime", [], id="connect-time-not-string-or-null"),
-            pytest.param(
-                "lastDisconnectTime",
-                {},
-                id="disconnect-time-not-string-or-null",
-            ),
             pytest.param("online", "true", id="online-not-bool"),
         ],
     )
     def test_invalid_field_type_raises(self, field: str, value: object) -> None:
         """Reject stream state responses with malformed field types."""
+        observed_at = datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC)
         response: dict[str, object] = {
             "streamTitle": "My Stream",
-            "lastConnectTime": None,
-            "lastDisconnectTime": None,
             "online": True,
         }
         response[field] = value
 
         with pytest.raises(InvalidApiResponseError):
-            StreamState.from_api_response(response, "example.com")
+            StreamState.from_api_response(response, "example.com", observed_at)
 
 
 class TestStreamStateFromDbRow:
@@ -198,16 +216,16 @@ class TestStreamStateFromDbRow:
             "domain": "example.com",
             "name": "Test Instance",
             "title": "Live Now",
-            "last_connect_time": "2026-01-01T00:00:00Z",
-            "last_disconnect_time": "2025-12-31T23:00:00Z",
+            "online": True,
+            "status_since": "2026-01-01T00:00:00+00:00",
             "failure_counter": 3,
         }
         state = StreamState.from_db_row(row)
         assert state.domain == "example.com"
         assert state.name == "Test Instance"
         assert state.title == "Live Now"
-        assert state.last_connect_time == "2026-01-01T00:00:00Z"
-        assert state.last_disconnect_time == "2025-12-31T23:00:00Z"
+        assert state.online is True
+        assert state.status_since == "2026-01-01T00:00:00+00:00"
         assert state.failure_counter == 3
 
     def test_row_with_none_optional_fields(self) -> None:
@@ -216,16 +234,16 @@ class TestStreamStateFromDbRow:
             "domain": "example.com",
             "name": None,
             "title": None,
-            "last_connect_time": None,
-            "last_disconnect_time": None,
+            "online": False,
+            "status_since": None,
             "failure_counter": 0,
         }
         state = StreamState.from_db_row(row)
         assert state.domain == "example.com"
         assert state.name is None
         assert state.title is None
-        assert state.last_connect_time is None
-        assert state.last_disconnect_time is None
+        assert state.online is False
+        assert state.status_since is None
         assert state.failure_counter == 0
 
 

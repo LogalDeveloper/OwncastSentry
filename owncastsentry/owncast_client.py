@@ -15,6 +15,7 @@
 """HTTP client for querying Owncast instance APIs."""
 
 import json
+from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
@@ -125,8 +126,11 @@ class OwncastClient:
             if new_state is None:
                 return None
 
+            observed_at = datetime.now(UTC)
             try:
-                stream_state = StreamState.from_api_response(new_state, domain)
+                stream_state = StreamState.from_api_response(
+                    new_state, domain, observed_at
+                )
             except InvalidApiResponseError as e:
                 self.log.warning(
                     "[%s] Rejecting response to request on %s as response "

@@ -15,6 +15,7 @@
 """Data containers and domain errors for OwncastSentry."""
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -47,14 +48,6 @@ def _require_str(response: dict[str, Any], field: str) -> str:
     return value
 
 
-def _require_nullable_str(response: dict[str, Any], field: str) -> str | None:
-    """Return a required nullable string API response field."""
-    value = _require_field(response, field)
-    if value is not None and not isinstance(value, str):
-        raise InvalidApiResponseError(f"{field} must be a string or null")
-    return value
-
-
 def _optional_config_str(response: dict[str, Any], field: str) -> str:
     """Return an optional config string, defaulting to empty when absent."""
     value = response.get(field, "")
@@ -80,6 +73,13 @@ def _truncate(text: str, max_length: int) -> str:
     return text[:max_length]
 
 
+def format_status_since(timestamp: datetime) -> str:
+    """Format a status timestamp using the package's canonical UTC format."""
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=UTC)
+    return timestamp.astimezone(UTC).isoformat(timespec="seconds")
+
+
 class StreamStatus(Enum):
     """Represents the status of a stream."""
 
@@ -95,35 +95,36 @@ class StreamState:
     domain: str
     name: str | None = None
     title: str | None = None
-    last_connect_time: str | None = None
-    last_disconnect_time: str | None = None
+    online: bool = False
+    status_since: str | None = None
     failure_counter: int = 0
 
     @property
     def status(self) -> StreamStatus:
-        """Derive stream status from failure count and last connect time.
+        """Derive stream status from failure count and online state.
 
-        Returns UNKNOWN if failures exceed the threshold, ONLINE if a
-        last connect time is present, or OFFLINE otherwise.
+        Returns UNKNOWN if failures exceed the threshold, ONLINE if the
+        stream is online, or OFFLINE otherwise.
         """
         if self.failure_counter > UNKNOWN_STATUS_THRESHOLD:
             return StreamStatus.UNKNOWN
-        if self.last_connect_time is not None:
+        if self.online:
             return StreamStatus.ONLINE
         return StreamStatus.OFFLINE
 
     @classmethod
-    def from_api_response(cls, response: dict[str, Any], domain: str) -> StreamState:
+    def from_api_response(
+        cls, response: dict[str, Any], domain: str, observed_at: datetime
+    ) -> StreamState:
         """Create a StreamState from an API response.
 
         :param response: API response as a dictionary (camelCase keys).
         :param domain: The stream domain.
+        :param observed_at: Local time when this status was observed.
         :return: StreamState instance.
         :raises InvalidApiResponseError: If the response shape is invalid.
         """
         stream_title = _require_str(response, "streamTitle")
-        last_connect_time = _require_nullable_str(response, "lastConnectTime")
-        last_disconnect_time = _require_nullable_str(response, "lastDisconnectTime")
         online = _require_field(response, "online")
         if not isinstance(online, bool):
             raise InvalidApiResponseError("online must be a boolean")
@@ -131,8 +132,8 @@ class StreamState:
         return cls(
             domain=domain,
             title=_truncate(stream_title, _MAX_STREAM_TITLE_LENGTH),
-            last_connect_time=last_connect_time,
-            last_disconnect_time=last_disconnect_time,
+            online=online,
+            status_since=format_status_since(observed_at),
         )
 
     @classmethod
@@ -146,8 +147,8 @@ class StreamState:
             domain=row["domain"],
             name=row["name"],
             title=row["title"],
-            last_connect_time=row["last_connect_time"],
-            last_disconnect_time=row["last_disconnect_time"],
+            online=bool(row["online"]),
+            status_since=row["status_since"],
             failure_counter=row["failure_counter"],
         )
 

@@ -18,7 +18,7 @@ import asyncio
 import time
 from typing import TYPE_CHECKING
 
-from .types import StreamState, StreamStatus, UpdateResult
+from .types import StreamState, UpdateResult
 
 if TYPE_CHECKING:
     import logging
@@ -178,8 +178,8 @@ class StreamMonitor:
             # Backoff is expected behavior, not a failure
             return True
 
-        # Flag: no connect/disconnect time has been recorded yet, so suppress
-        # notifications for a stream whose initial history state is live.
+        # Flag: no status timestamp has been recorded yet, so suppress
+        # notifications for a stream's first observed state.
         first_update = False
 
         # Flag: whether to update the stream's state in the database.
@@ -216,20 +216,20 @@ class StreamMonitor:
         # Initialize timer cache entries to prevent KeyError on first access
         self.offline_timer_cache.setdefault(domain, 0)
 
-        # Does the last known stream state lack connect/disconnect?
-        if (
-            old_state.last_connect_time is None
-            and old_state.last_disconnect_time is None
-        ):
+        if old_state.status_since is None:
             # No stream history has been recorded yet. Don't send notifications.
             update_database = True
             first_update = True
 
-        # Does the new state have a connect time but the old one not?
-        if (
-            new_state.last_connect_time is not None
-            and old_state.last_connect_time is None
-        ):
+        if first_update:
+            self.log.info(
+                "[%s] Not sending notifications. This is the first state "
+                "update for this stream.",
+                domain,
+            )
+
+        # Did the stream become publicly online?
+        elif new_state.online and not old_state.online:
             # Yes! This stream is now live.
             update_database = True
             stream_config = await self.owncast_client.get_stream_config(domain)
@@ -241,59 +241,43 @@ class StreamMonitor:
                 time.monotonic() - self.offline_timer_cache[domain]
             )
 
-            # Has a prior connect/disconnect time been recorded?
-            if not first_update:
-                # Use fallback values if config fetch failed
-                stream_name = stream_config.name if stream_config else domain
-                stream_tags = stream_config.tags if stream_config else ()
+            # Use fallback values if config fetch failed
+            stream_name = stream_config.name if stream_config else domain
+            stream_tags = stream_config.tags if stream_config else ()
 
-                # Has this stream been offline for a short time?
-                if (
-                    seconds_since_last_offline
-                    < _TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN
-                ):
-                    # Did the stream title change?
-                    if old_state.title != new_state.title:
-                        # Stream was briefly down; send title
-                        # change notification.
-                        await self.notification_service.notify_stream_live(
-                            domain,
-                            stream_name,
-                            new_state.title or "",
-                            stream_tags,
-                            title_change=True,
-                        )
-                    else:
-                        # Briefly offline, no title change. Skip.
-                        self.log.info(
-                            "[%s] Not sending notifications. Stream was only "
-                            "offline for %s of %s seconds and did not change "
-                            "its title.",
-                            domain,
-                            seconds_since_last_offline,
-                            _TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN,
-                        )
-                else:
-                    # Offline for a while. Send a normal notification.
+            # Has this stream been offline for a short time?
+            if seconds_since_last_offline < _TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN:
+                # Did the stream title change?
+                if old_state.title != new_state.title:
+                    # Stream was briefly down; send title change notification.
                     await self.notification_service.notify_stream_live(
                         domain,
                         stream_name,
                         new_state.title or "",
                         stream_tags,
-                        title_change=False,
+                        title_change=True,
+                    )
+                else:
+                    # Briefly offline, no title change. Skip.
+                    self.log.info(
+                        "[%s] Not sending notifications. Stream was only "
+                        "offline for %s of %s seconds and did not change "
+                        "its title.",
+                        domain,
+                        seconds_since_last_offline,
+                        _TEMPORARY_OFFLINE_NOTIFICATION_COOLDOWN,
                     )
             else:
-                # No stream history has been recorded yet.
-                self.log.info(
-                    "[%s] Not sending notifications. This is the first state "
-                    "update for this stream.",
+                # Offline for a while. Send a normal notification.
+                await self.notification_service.notify_stream_live(
                     domain,
+                    stream_name,
+                    new_state.title or "",
+                    stream_tags,
+                    title_change=False,
                 )
 
-        if (
-            new_state.last_connect_time is not None
-            and old_state.last_connect_time is not None
-        ):
+        elif new_state.online and old_state.online:
             # Did the stream title change mid-session?
             if old_state.title != new_state.title:
                 self.log.info("[%s] Stream title was changed!", domain)
@@ -327,11 +311,8 @@ class StreamMonitor:
                         title_change=True,
                     )
 
-        # Did the stream go offline (old had connect, new doesn't)?
-        elif (
-            new_state.last_connect_time is None
-            and old_state.last_connect_time is not None
-        ):
+        # Did the stream go offline?
+        elif not new_state.online and old_state.online:
             # Yep. This stream is now offline. Log it.
             update_database = True
             self.offline_timer_cache[domain] = time.monotonic()
@@ -348,23 +329,25 @@ class StreamMonitor:
 
             self.log.debug("[%s] Updating stream state in database...", domain)
 
+            if first_update or old_state.online != new_state.online:
+                status_since = new_state.status_since
+            else:
+                status_since = old_state.status_since
+
             # Create updated state object (title already truncated in new_state)
             updated_state = StreamState(
                 domain=domain,
                 name=stream_name,
                 title=new_state.title,
-                last_connect_time=new_state.last_connect_time,
-                last_disconnect_time=new_state.last_disconnect_time,
+                online=new_state.online,
+                status_since=status_since,
             )
 
             await self.stream_repo.update(updated_state)
 
         # All done.
         self.log.debug("[%s] State update completed.", domain)
-        if new_state.last_connect_time is not None:
-            self.metrics.set_stream_status(domain, StreamStatus.ONLINE)
-        else:
-            self.metrics.set_stream_status(domain, StreamStatus.OFFLINE)
+        self.metrics.set_stream_status(domain, new_state.status)
         return True
 
     async def _check_cleanup_thresholds(self, domain: str, counter: int) -> None:

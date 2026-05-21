@@ -14,6 +14,7 @@
 
 """Repository and schema upgrade definitions for OwncastSentry."""
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from mautrix.util.async_db import Connection, UpgradeTable
@@ -24,6 +25,7 @@ from .types import (
     NotSubscribedError,
     RoomSubscription,
     StreamState,
+    format_status_since,
 )
 
 if TYPE_CHECKING:
@@ -31,6 +33,33 @@ if TYPE_CHECKING:
 
 
 upgrade_table = UpgradeTable()
+
+
+def _has_legacy_timestamp(value: Any) -> bool:
+    """Return whether a legacy timestamp value carries usable content."""
+    return value is not None and str(value).strip() != ""
+
+
+def _normalize_legacy_status_since(value: Any) -> str | None:
+    """Normalize a legacy timestamp value to the canonical UTC format."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    else:
+        return None
+
+    if parsed.tzinfo is None:
+        return None
+    return format_status_since(parsed.astimezone(UTC))
 
 
 @upgrade_table.register(  # type: ignore[arg-type, call-arg, untyped-decorator]
@@ -107,6 +136,56 @@ async def upgrade_v3(conn: Connection) -> None:
     )
 
 
+@upgrade_table.register(  # type: ignore[arg-type, call-arg, untyped-decorator]
+    description="Store online status and current status timestamp"
+)
+async def upgrade_v4(conn: Connection) -> None:
+    """Upgrade database schema to version 4 format.
+
+    Replaces separate connect and disconnect timestamp columns with an
+    authoritative online flag and a timestamp for the current status.
+
+    :param conn: A connection to run the v4 database migration on.
+    """
+    await conn.execute(
+        """CREATE TABLE "streams_new" (
+            "domain"    TEXT NOT NULL UNIQUE,
+            "name"  TEXT,
+            "title" TEXT,
+            "online" BOOLEAN NOT NULL DEFAULT false,
+            "status_since" TEXT,
+            "failure_counter" INTEGER DEFAULT 0,
+            PRIMARY KEY("domain")
+        )"""
+    )
+
+    rows = await conn.fetch(
+        """SELECT domain, name, title, last_connect_time, last_disconnect_time,
+                  failure_counter
+           FROM streams"""
+    )
+    for row in rows:
+        online = _has_legacy_timestamp(row["last_connect_time"])
+        legacy_timestamp = (
+            row["last_connect_time"] if online else row["last_disconnect_time"]
+        )
+        await conn.execute(
+            """INSERT INTO streams_new (
+                   domain, name, title, online, status_since, failure_counter
+               )
+               VALUES ($1, $2, $3, $4, $5, $6)""",
+            row["domain"],
+            row["name"],
+            row["title"],
+            online,
+            _normalize_legacy_status_since(legacy_timestamp),
+            row["failure_counter"],
+        )
+
+    await conn.execute("DROP TABLE streams")
+    await conn.execute("ALTER TABLE streams_new RENAME TO streams")
+
+
 def get_upgrade_table() -> UpgradeTable:
     """Return the repository upgrade table with registered migrations."""
     return upgrade_table
@@ -164,15 +243,15 @@ class StreamRepository:
         :param state: The StreamState to save.
         """
         query = """UPDATE streams
-                   SET name=$1, title=$2, last_connect_time=$3, last_disconnect_time=$4
+                   SET name=$1, title=$2, online=$3, status_since=$4
                    WHERE domain=$5"""
         async with self.db.acquire() as conn:
             await conn.execute(
                 query,
                 state.name,
                 state.title,
-                state.last_connect_time,
-                state.last_disconnect_time,
+                state.online,
+                state.status_since,
                 state.domain,
             )
 
@@ -313,7 +392,7 @@ class SubscriptionRepository:
                    FROM subscriptions
                    JOIN streams ON streams.domain = subscriptions.stream_domain
                    WHERE subscriptions.room_id=$1
-                     AND streams.last_connect_time IS NOT NULL
+                     AND streams.online=true
                      AND streams.failure_counter <= $2
                    ORDER BY streams.domain"""
         async with self.db.acquire() as conn:

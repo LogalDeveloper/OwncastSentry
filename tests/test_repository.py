@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from owncastsentry.repository import _normalize_legacy_status_since
 from owncastsentry.types import (
     UNKNOWN_STATUS_THRESHOLD,
     AlreadySubscribedError,
@@ -26,7 +27,62 @@ from owncastsentry.types import (
 )
 
 if TYPE_CHECKING:
+    from mautrix.util.async_db import Database
+
     from owncastsentry.repository import StreamRepository, SubscriptionRepository
+
+
+class TestStreamSchema:
+    """Streams table schema after migrations."""
+
+    async def test_uses_online_and_status_since_columns(
+        self, database: Database
+    ) -> None:
+        """Create the current schema without legacy connect/disconnect columns."""
+        async with database.acquire() as conn:
+            rows = await conn.fetch("PRAGMA table_info(streams)")
+
+        assert [row["name"] for row in rows] == [
+            "domain",
+            "name",
+            "title",
+            "online",
+            "status_since",
+            "failure_counter",
+        ]
+
+
+class TestNormalizeLegacyStatusSince:
+    """Legacy timestamp normalization used by the v4 migration."""
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            pytest.param(
+                "2026-05-21T19:06:24Z",
+                "2026-05-21T19:06:24+00:00",
+                id="utc-z",
+            ),
+            pytest.param(
+                "2026-05-21T19:38:40+02:00",
+                "2026-05-21T17:38:40+00:00",
+                id="positive-offset",
+            ),
+            pytest.param(
+                "2026-05-17T21:23:27-04:00",
+                "2026-05-18T01:23:27+00:00",
+                id="negative-offset",
+            ),
+            pytest.param("", None, id="blank"),
+            pytest.param(None, None, id="null"),
+            pytest.param("not a timestamp", None, id="malformed"),
+        ],
+    )
+    def test_normalizes_parseable_aware_timestamps(
+        self, value: str | None, expected: str | None
+    ) -> None:
+        """Normalize parseable legacy values and ignore unusable ones."""
+        assert _normalize_legacy_status_since(value) == expected
 
 
 class TestStreamExists:
@@ -174,7 +230,7 @@ class TestGetLiveRoomSubscriptions:
             StreamState(
                 domain="offline.example",
                 name="Offline",
-                last_disconnect_time="2026-01-01T00:00:00Z",
+                status_since="2026-01-01T00:00:00+00:00",
             )
         )
         await stream_repo.create("online.example")
@@ -182,7 +238,8 @@ class TestGetLiveRoomSubscriptions:
             StreamState(
                 domain="online.example",
                 name="Online",
-                last_connect_time="2026-01-01T00:00:00Z",
+                online=True,
+                status_since="2026-01-01T00:00:00+00:00",
             )
         )
         await stream_repo.create("unknown.example")
@@ -190,7 +247,8 @@ class TestGetLiveRoomSubscriptions:
             StreamState(
                 domain="unknown.example",
                 name="Unknown",
-                last_connect_time="2026-01-01T00:00:00Z",
+                online=True,
+                status_since="2026-01-01T00:00:00+00:00",
             )
         )
         for _ in range(UNKNOWN_STATUS_THRESHOLD + 1):

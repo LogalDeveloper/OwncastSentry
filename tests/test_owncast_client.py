@@ -16,9 +16,11 @@
 
 import json
 import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
+import time_machine
 from aioresponses import aioresponses
 
 from owncastsentry.metrics import MetricsService
@@ -112,17 +114,13 @@ class TestReadLimitedResponseBody:
         response = _ChunkedResponse(
             (
                 b'{"streamTitle":',
-                b'"hello","online":true,',
-                b'"lastConnectTime":null,"lastDisconnectTime":null}',
+                b'"hello","online":true}',
             )
         )
 
         result = await _read_limited_response_body(response)
 
-        assert result == bytearray(
-            b'{"streamTitle":"hello","online":true,'
-            b'"lastConnectTime":null,"lastDisconnectTime":null}'
-        )
+        assert result == bytearray(b'{"streamTitle":"hello","online":true}')
 
     async def test_returns_none_when_content_length_is_too_large(self) -> None:
         """Return None when Content-Length is already over the limit."""
@@ -152,6 +150,7 @@ class TestReadLimitedResponseBody:
 class TestGetStreamState:
     """Stream state retrieval from the status API."""
 
+    @time_machine.travel(datetime(2026, 3, 13, 12, 0, 0, tzinfo=UTC))
     async def test_returns_state_on_success(
         self, owncast_client: OwncastClient
     ) -> None:
@@ -169,14 +168,14 @@ class TestGetStreamState:
             result.title
             == "I think I can do this... Let's start a nuclear reaction - Playing Nucleares!"  # noqa: E501
         )
-        assert result.last_connect_time is None
-        assert result.last_disconnect_time == "2026-03-04T21:05:32-05:00"
+        assert result.online is False
+        assert result.status_since == "2026-03-13T12:00:00+00:00"
 
     async def test_returns_none_on_missing_field(
         self, owncast_client: OwncastClient
     ) -> None:
         """Return None when the response is missing required fields."""
-        incomplete = {"streamTitle": "Test Stream", "online": True}
+        incomplete = {"streamTitle": "Test Stream"}
         with aioresponses() as mocked:
             mocked.get(
                 "https://stream.logal.dev/api/status",

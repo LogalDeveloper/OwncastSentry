@@ -262,7 +262,8 @@ class TestSubscriptionsCommand:
                 domain="stream.logal.dev",
                 name="Test Stream",
                 title="Playing Games",
-                last_connect_time="2026-01-01T12:00:00Z",
+                online=True,
+                status_since="2026-01-01T12:00:00+00:00",
             )
         )
 
@@ -297,7 +298,8 @@ class TestSubscriptionsCommand:
                 domain="stream.logal.dev",
                 name="*Bold* [link](https://evil.example)\nName",
                 title="`code` > quote #tag",
-                last_connect_time="2026-01-01T12:00:00Z",
+                online=True,
+                status_since="2026-01-01T12:00:00+00:00",
             )
         )
 
@@ -333,7 +335,7 @@ class TestSubscriptionsCommand:
             StreamState(
                 domain="stream.logal.dev",
                 name="Test Stream",
-                last_disconnect_time="2026-01-01T10:00:00Z",
+                status_since="2026-01-01T10:00:00+00:00",
             )
         )
 
@@ -428,14 +430,15 @@ class TestSubscriptionsCommand:
                 domain="alpha.com",
                 name="Alpha Stream",
                 title="Streaming Live",
-                last_connect_time="2026-03-13T10:00:00Z",
+                online=True,
+                status_since="2026-03-13T10:00:00+00:00",
             )
         )
         await maubot_plugin.stream_repo.update(
             StreamState(
                 domain="beta.com",
                 name="Beta Stream",
-                last_disconnect_time="2026-03-12T18:00:00Z",
+                status_since="2026-03-12T18:00:00+00:00",
             )
         )
 
@@ -491,7 +494,7 @@ class TestLiveCommand:
             StreamState(
                 domain="stream.logal.dev",
                 name="Test Stream",
-                last_disconnect_time="2026-01-01T10:00:00Z",
+                status_since="2026-01-01T10:00:00+00:00",
             )
         )
 
@@ -524,7 +527,8 @@ class TestLiveCommand:
                 domain="stream.logal.dev",
                 name="Test Stream",
                 title="Playing Games",
-                last_connect_time="2026-01-01T12:00:00Z",
+                online=True,
+                status_since="2026-01-01T12:00:00+00:00",
             )
         )
 
@@ -557,13 +561,14 @@ class TestLiveCommand:
             await maubot_test_bot.send("!subscribe beta.com")
             await maubot_test_bot.send("!subscribe alpha.com")
 
-        # Set both streams online with different connect times
+        # Set both streams online with different status timestamps
         await maubot_plugin.stream_repo.update(
             StreamState(
                 domain="alpha.com",
                 name="Alpha Stream",
                 title="Morning Show",
-                last_connect_time="2026-03-13T10:00:00Z",
+                online=True,
+                status_since="2026-03-13T10:00:00+00:00",
             )
         )
         await maubot_plugin.stream_repo.update(
@@ -571,7 +576,8 @@ class TestLiveCommand:
                 domain="beta.com",
                 name="Beta Stream",
                 title="Evening Vibes",
-                last_connect_time="2026-03-13T06:00:00Z",
+                online=True,
+                status_since="2026-03-13T06:00:00+00:00",
             )
         )
 

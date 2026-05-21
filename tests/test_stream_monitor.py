@@ -87,8 +87,8 @@ async def _seed_stream(
     room_id: str = "!room:matrix.org",
     name: str | None = "Test Stream",
     title: str | None = "Test Title",
-    last_connect_time: str | None = None,
-    last_disconnect_time: str | None = None,
+    online: bool = False,
+    status_since: str | None = None,
 ) -> None:
     """Insert a stream and subscription into the database."""
     await stream_repo.create(domain)
@@ -96,8 +96,8 @@ async def _seed_stream(
         domain=domain,
         name=name,
         title=title,
-        last_connect_time=last_connect_time,
-        last_disconnect_time=last_disconnect_time,
+        online=online,
+        status_since=status_since,
     )
     await stream_repo.update(state)
     await subscription_repo.add(domain, room_id)
@@ -224,7 +224,9 @@ class TestUpdateAllStreams:
         """Return an UpdateResult with correct success and failure counts."""
         owncast = _StubOwncastClient(
             stream_state=StreamState(
-                domain="ok.com", last_connect_time="2026-01-01T00:00:00Z"
+                domain="ok.com",
+                online=True,
+                status_since="2026-01-01T00:00:00+00:00",
             ),
             stream_config=StreamConfig(name="OK"),
         )
@@ -291,8 +293,8 @@ class TestUpdateStreamFirstUpdate:
         owncast = _StubOwncastClient(
             stream_state=StreamState(
                 domain="new.com",
-                last_connect_time="2026-01-01T00:00:00Z",
-                last_disconnect_time="2025-12-31T00:00:00Z",
+                online=True,
+                status_since="2026-01-01T00:00:00+00:00",
             ),
             stream_config=StreamConfig(name="New Stream"),
         )
@@ -304,7 +306,7 @@ class TestUpdateStreamFirstUpdate:
             client=client,
         )
 
-        # Seed with no connect/disconnect times (brand new)
+        # Seed with no status timestamp (brand new)
         await stream_repo.create("new.com")
         await subscription_repo.add("new.com", "!room:matrix.org")
 
@@ -321,7 +323,7 @@ class TestUpdateStreamFirstUpdate:
         owncast = _StubOwncastClient(
             stream_state=StreamState(
                 domain="new.com",
-                last_disconnect_time="2025-12-31T00:00:00Z",
+                status_since="2025-12-31T00:00:00+00:00",
             ),
             stream_config=StreamConfig(name="New Stream"),
         )
@@ -354,8 +356,8 @@ class TestUpdateStreamGoesLive:
             stream_state=StreamState(
                 domain="live.com",
                 title="Now Streaming",
-                last_connect_time="2026-01-01T12:00:00Z",
-                last_disconnect_time="2026-01-01T10:00:00Z",
+                online=True,
+                status_since="2026-01-01T12:00:00+00:00",
             ),
             stream_config=StreamConfig(name="Live Stream", tags=("gaming",)),
         )
@@ -367,12 +369,12 @@ class TestUpdateStreamGoesLive:
             client=client,
         )
 
-        # Seed as offline (has disconnect but no connect)
+        # Seed as offline.
         await _seed_stream(
             stream_repo,
             subscription_repo,
             domain="live.com",
-            last_disconnect_time="2026-01-01T10:00:00Z",
+            status_since="2026-01-01T10:00:00+00:00",
         )
 
         # Set offline timer to long ago so it's not a brief outage
@@ -402,8 +404,8 @@ class TestUpdateStreamGoesLive:
             stream_state=StreamState(
                 domain="live.com",
                 title="Now Streaming",
-                last_connect_time="2026-01-01T12:00:00Z",
-                last_disconnect_time="2026-01-01T10:00:00Z",
+                online=True,
+                status_since="2026-01-01T12:00:00+00:00",
             ),
             stream_config=None,
         )
@@ -419,7 +421,7 @@ class TestUpdateStreamGoesLive:
             stream_repo,
             subscription_repo,
             domain="live.com",
-            last_disconnect_time="2026-01-01T10:00:00Z",
+            status_since="2026-01-01T10:00:00+00:00",
         )
 
         monitor.offline_timer_cache["live.com"] = (
@@ -450,7 +452,8 @@ class TestUpdateStreamBriefOffline:
             stream_state=StreamState(
                 domain="brief.com",
                 title="Same Title",
-                last_connect_time="2026-01-01T12:00:00Z",
+                online=True,
+                status_since="2026-01-01T12:00:00+00:00",
             ),
             stream_config=StreamConfig(name="Brief Stream"),
         )
@@ -468,7 +471,7 @@ class TestUpdateStreamBriefOffline:
             subscription_repo,
             domain="brief.com",
             title="Same Title",
-            last_disconnect_time="2026-01-01T11:55:00Z",
+            status_since="2026-01-01T11:55:00+00:00",
         )
 
         # Recently offline (within cooldown)
@@ -488,7 +491,8 @@ class TestUpdateStreamBriefOffline:
             stream_state=StreamState(
                 domain="brief.com",
                 title="New Title",
-                last_connect_time="2026-01-01T12:00:00Z",
+                online=True,
+                status_since="2026-01-01T12:00:00+00:00",
             ),
             stream_config=StreamConfig(name="Brief Stream"),
         )
@@ -506,7 +510,7 @@ class TestUpdateStreamBriefOffline:
             subscription_repo,
             domain="brief.com",
             title="Old Title",
-            last_disconnect_time="2026-01-01T11:55:00Z",
+            status_since="2026-01-01T11:55:00+00:00",
         )
 
         # Recently offline (within cooldown)
@@ -536,7 +540,8 @@ class TestUpdateStreamTitleChange:
             stream_state=StreamState(
                 domain="title.com",
                 title="Updated Title",
-                last_connect_time="2026-01-01T12:00:00Z",
+                online=True,
+                status_since="2026-01-01T12:00:00+00:00",
             ),
             stream_config=None,
         )
@@ -553,7 +558,8 @@ class TestUpdateStreamTitleChange:
             subscription_repo,
             domain="title.com",
             title="Original Title",
-            last_connect_time="2026-01-01T12:00:00Z",
+            online=True,
+            status_since="2026-01-01T12:00:00+00:00",
         )
 
         now = time.monotonic()
@@ -585,7 +591,8 @@ class TestUpdateStreamTitleChange:
             stream_state=StreamState(
                 domain="title.com",
                 title="Updated Title",
-                last_connect_time="2026-01-01T12:00:00Z",
+                online=True,
+                status_since="2026-01-01T12:00:00+00:00",
             ),
             stream_config=StreamConfig(name="Title Stream"),
         )
@@ -603,7 +610,8 @@ class TestUpdateStreamTitleChange:
             subscription_repo,
             domain="title.com",
             title="Original Title",
-            last_connect_time="2026-01-01T12:00:00Z",
+            online=True,
+            status_since="2026-01-01T12:00:00+00:00",
         )
 
         # Last notification was long enough ago to pass rate limiting,
@@ -637,7 +645,8 @@ class TestUpdateStreamTitleChange:
             stream_state=StreamState(
                 domain="title.com",
                 title="Updated Title",
-                last_connect_time="2026-01-01T12:00:00Z",
+                online=True,
+                status_since="2026-01-01T12:00:00+00:00",
             ),
             stream_config=StreamConfig(name="Title Stream"),
         )
@@ -654,7 +663,8 @@ class TestUpdateStreamTitleChange:
             subscription_repo,
             domain="title.com",
             title="Original Title",
-            last_connect_time="2026-01-01T12:00:00Z",
+            online=True,
+            status_since="2026-01-01T12:00:00+00:00",
         )
 
         # Offline timer is MORE recent than last notification,
@@ -691,7 +701,7 @@ class TestUpdateStreamGoesOffline:
             stream_state=StreamState(
                 domain="offline.com",
                 title="Title",
-                last_disconnect_time="2026-01-01T12:00:00Z",
+                status_since="2026-01-01T12:00:00+00:00",
             ),
             stream_config=StreamConfig(name="Offline Stream"),
         )
@@ -708,7 +718,8 @@ class TestUpdateStreamGoesOffline:
             stream_repo,
             subscription_repo,
             domain="offline.com",
-            last_connect_time="2026-01-01T10:00:00Z",
+            online=True,
+            status_since="2026-01-01T10:00:00+00:00",
         )
         monitor.offline_timer_cache["offline.com"] = 0
 
@@ -743,7 +754,7 @@ class TestUpdateStreamConnectionFailure:
             stream_repo,
             subscription_repo,
             domain="fail.com",
-            last_disconnect_time="2026-01-01T00:00:00Z",
+            status_since="2026-01-01T00:00:00+00:00",
         )
 
         result = await monitor.update_stream("fail.com")
@@ -865,7 +876,7 @@ class TestUpdateStreamNoStateChange:
             stream_state=StreamState(
                 domain="stable.com",
                 title="Same Title",
-                last_disconnect_time="2026-01-01T12:00:00Z",
+                status_since="2026-01-01T12:00:00+00:00",
             ),
         )
         client = _StubMatrixClient()
@@ -876,13 +887,13 @@ class TestUpdateStreamNoStateChange:
             client=client,
         )
 
-        # Seed as offline with same disconnect time and title
+        # Seed as offline with same status timestamp and title.
         await _seed_stream(
             stream_repo,
             subscription_repo,
             domain="stable.com",
             title="Same Title",
-            last_disconnect_time="2026-01-01T12:00:00Z",
+            status_since="2026-01-01T12:00:00+00:00",
         )
 
         result = await monitor.update_stream("stable.com")
@@ -905,7 +916,7 @@ class TestUpdateStreamFailureCounterReset:
             stream_state=StreamState(
                 domain="recover.com",
                 title="Title",
-                last_disconnect_time="2026-01-01T12:00:00Z",
+                status_since="2026-01-01T12:00:00+00:00",
             ),
         )
         client = _StubMatrixClient()
@@ -921,7 +932,7 @@ class TestUpdateStreamFailureCounterReset:
             subscription_repo,
             domain="recover.com",
             title="Title",
-            last_disconnect_time="2026-01-01T12:00:00Z",
+            status_since="2026-01-01T12:00:00+00:00",
         )
 
         # Simulate prior failures (counter=4 still passes backoff)
@@ -964,7 +975,7 @@ class TestUpdateAllStreamsMixed:
             stream_repo,
             subscription_repo,
             domain="fail.com",
-            last_disconnect_time="2026-01-01T00:00:00Z",
+            status_since="2026-01-01T00:00:00+00:00",
         )
 
         # "skip.com" will be skipped via backoff (returns True)
@@ -973,7 +984,7 @@ class TestUpdateAllStreamsMixed:
             subscription_repo,
             domain="skip.com",
             room_id="!room2:matrix.org",
-            last_disconnect_time="2026-01-01T00:00:00Z",
+            status_since="2026-01-01T00:00:00+00:00",
         )
         for _ in range(5):
             await stream_repo.increment_failure_counter("skip.com")
@@ -993,7 +1004,7 @@ class TestUpdateAllStreamsMixed:
             stream_state=StreamState(
                 domain="ok.com",
                 title="Title",
-                last_disconnect_time="2026-01-01T00:00:00Z",
+                status_since="2026-01-01T00:00:00+00:00",
             ),
         )
         # Patch get_stream_state to raise for one specific domain
@@ -1019,7 +1030,7 @@ class TestUpdateAllStreamsMixed:
             stream_repo,
             subscription_repo,
             domain="raise.com",
-            last_disconnect_time="2026-01-01T00:00:00Z",
+            status_since="2026-01-01T00:00:00+00:00",
         )
         await _seed_stream(
             stream_repo,
@@ -1027,7 +1038,7 @@ class TestUpdateAllStreamsMixed:
             domain="ok.com",
             room_id="!room2:matrix.org",
             title="Title",
-            last_disconnect_time="2026-01-01T00:00:00Z",
+            status_since="2026-01-01T00:00:00+00:00",
         )
 
         result = await monitor.update_all_streams(["raise.com", "ok.com"])
@@ -1049,8 +1060,8 @@ class TestStreamMonitorMetrics:
             stream_state=StreamState(
                 domain="live.com",
                 title="Title",
-                last_connect_time="2026-01-01T12:00:00Z",
-                last_disconnect_time="2026-01-01T10:00:00Z",
+                online=True,
+                status_since="2026-01-01T12:00:00+00:00",
             ),
             stream_config=StreamConfig(name="Live Stream"),
         )
@@ -1065,7 +1076,7 @@ class TestStreamMonitorMetrics:
             stream_repo,
             subscription_repo,
             domain="live.com",
-            last_disconnect_time="2026-01-01T10:00:00Z",
+            status_since="2026-01-01T10:00:00+00:00",
         )
         monitor.offline_timer_cache["live.com"] = 0
         await monitor.update_stream("live.com")
@@ -1082,7 +1093,7 @@ class TestStreamMonitorMetrics:
             stream_state=StreamState(
                 domain="off.com",
                 title="Title",
-                last_disconnect_time="2026-01-01T12:00:00Z",
+                status_since="2026-01-01T12:00:00+00:00",
             ),
             stream_config=StreamConfig(name="Off Stream"),
         )
@@ -1098,7 +1109,7 @@ class TestStreamMonitorMetrics:
             subscription_repo,
             domain="off.com",
             title="Title",
-            last_disconnect_time="2026-01-01T12:00:00Z",
+            status_since="2026-01-01T12:00:00+00:00",
         )
         await monitor.update_stream("off.com")
         output = generate_metrics_output(metrics)
@@ -1122,7 +1133,7 @@ class TestStreamMonitorMetrics:
             stream_repo,
             subscription_repo,
             domain="fail.com",
-            last_disconnect_time="2026-01-01T00:00:00Z",
+            status_since="2026-01-01T00:00:00+00:00",
         )
         await monitor.update_stream("fail.com")
         output = generate_metrics_output(metrics)
@@ -1138,7 +1149,7 @@ class TestStreamMonitorMetrics:
             stream_state=StreamState(
                 domain="recover.com",
                 title="Title",
-                last_disconnect_time="2026-01-01T12:00:00Z",
+                status_since="2026-01-01T12:00:00+00:00",
             ),
             stream_config=StreamConfig(name="Recover"),
         )
@@ -1153,7 +1164,7 @@ class TestStreamMonitorMetrics:
             stream_repo,
             subscription_repo,
             domain="recover.com",
-            last_disconnect_time="2026-01-01T12:00:00Z",
+            status_since="2026-01-01T12:00:00+00:00",
         )
         # Simulate prior failures
         for _ in range(3):
@@ -1219,7 +1230,8 @@ class TestStreamMonitorMetrics:
         owncast = _StubOwncastClient(
             stream_state=StreamState(
                 domain="pop.com",
-                last_connect_time="2026-01-01T00:00:00Z",
+                online=True,
+                status_since="2026-01-01T00:00:00+00:00",
             ),
             stream_config=StreamConfig(name="Popular"),
         )

@@ -256,7 +256,7 @@ class TestManagerListings:
             StreamState(
                 domain="offline.example",
                 name="Offline",
-                last_disconnect_time="2026-01-01T00:00:00Z",
+                status_since="2026-01-01T00:00:00+00:00",
             )
         )
         await stream_repo.create("online.example")
@@ -264,7 +264,8 @@ class TestManagerListings:
             StreamState(
                 domain="online.example",
                 name="Online",
-                last_connect_time="2026-01-01T00:00:00Z",
+                online=True,
+                status_since="2026-01-01T00:00:00+00:00",
             )
         )
         await stream_repo.create("unknown.example")
@@ -272,7 +273,8 @@ class TestManagerListings:
             StreamState(
                 domain="unknown.example",
                 name="Unknown",
-                last_connect_time="2026-01-01T00:00:00Z",
+                online=True,
+                status_since="2026-01-01T00:00:00+00:00",
             )
         )
         for _ in range(UNKNOWN_STATUS_THRESHOLD + 1):
