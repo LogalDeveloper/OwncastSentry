@@ -13,64 +13,46 @@ or tests.
 
 - `__init__.py`: Maubot plugin entry point, service wiring, command
   decorators, scheduler loop, shutdown, and metrics endpoint.
+- `commands.py`: Maubot command handlers for subscribe, unsubscribe,
+  subscriptions, and live listings.
 - `config.py`: Maubot configuration proxy for the Prometheus metrics endpoint
   setting.
-- `types.py`: immutable value objects, Owncast API response validation, derived
-  stream status, update results, and subscription domain errors.
-- `repository.py`: database schema migrations plus stream and subscription
-  repositories.
+- `metrics.py`: Prometheus counters, gauges, registry setup, and response timing
+  helpers.
+- `notification_service.py`: Matrix notification formatting, broadcast,
+  per-domain notification cooldowns, cleanup notices, and delivery metrics.
 - `owncast_client.py`: bounded aiohttp client for Owncast `/api/status` and
   `/api/config` requests.
-- `subscription_manager.py`: subscription use cases, domain normalization, and
-  first-subscription Owncast validation.
+- `repository.py`: database schema migrations plus stream and subscription
+  repositories.
 - `stream_monitor.py`: stream update orchestration, state transition detection,
   progressive failure backoff, cleanup thresholds, notification decisions, and
   stream metrics.
-- `notification_service.py`: Matrix notification formatting, broadcast,
-  per-domain notification cooldowns, cleanup notices, and delivery metrics.
-- `commands.py`: Maubot command handlers for subscribe, unsubscribe,
-  subscriptions, and live listings.
-- `metrics.py`: isolated Prometheus registry, counters, gauges, and response
-  timing helpers.
+- `subscription_manager.py`: subscription use cases, domain normalization, and
+  first-subscription Owncast validation.
+- `types.py`: immutable value objects, Owncast API response validation, derived
+  stream status, update results, and subscription domain errors.
 
 The package has a service-layer shape: `OwncastSentry.start()` builds the
 services, commands call `CommandHandler`, command handlers call
-`SubscriptionManager`, scheduled updates call `StreamMonitor`, and
-`StreamMonitor` coordinates repositories, the Owncast client, notifications,
-and metrics.
-
-```mermaid
-flowchart LR
-    Maubot["Maubot loads OwncastSentry"] --> Start["OwncastSentry.start()"]
-    Start --> Repos["StreamRepository and SubscriptionRepository"]
-    Start --> Owncast["OwncastClient"]
-    Start --> Metrics["MetricsService"]
-    Start --> Notify["NotificationService"]
-    Start --> Monitor["StreamMonitor"]
-    Start --> Manager["SubscriptionManager"]
-    Start --> Commands["CommandHandler"]
-    Commands --> Manager
-    Manager --> Repos
-    Manager --> Owncast
-    Monitor --> Repos
-    Monitor --> Owncast
-    Monitor --> Notify
-    Monitor --> Metrics
-    Notify --> Repos
-    Notify --> Matrix["Matrix client"]
-```
+`SubscriptionManager`, and scheduled updates call `StreamMonitor`.
+`StreamMonitor` runs the main polling workflow: it checks Owncast streams,
+applies backoff and cleanup rules, classifies state transitions, triggers any
+live/title notifications, persists changed stream state, and records stream,
+failure, and subscription metrics.
 
 ## Core Concepts
 
 A few terms are used throughout the package:
 
-- A stream is a normalized Owncast domain tracked by the plugin. The database
-  stores one stream row per domain, even if multiple Matrix rooms subscribe to
-  it.
+- A stream is a tracked [Owncast](https://owncast.online/) instance, identified
+  by its normalized bare domain. The stored entry for that domain is the stream
+  record. There is one stream record per domain, even if multiple Matrix rooms
+  subscribe to it.
 - A subscription is a Matrix room's request to receive notifications for one
   stream domain.
-- `StreamStateObservation` is one successful Owncast status API sample. The
-  monitor decides whether the observation starts a new persisted status period.
+- `StreamStateObservation` is one successful Owncast status API sample used by
+  the monitor when updating stored stream state.
 - `StreamConfigObservation` is metadata fetched from Owncast's config API,
   currently the instance name and tags used in notifications and periodic
   display-name refreshes.
@@ -83,9 +65,11 @@ Durable state lives in the database. The `streams` table stores the latest
 known display and state fields for each Owncast domain, and the `subscriptions`
 table stores which Matrix rooms follow each domain.
 
-Subscriptions are room-scoped, while stream state is shared per domain.
-Notification delivery fans out from one stored stream state to the rooms
-currently subscribed to that domain.
+Subscriptions belong to individual Matrix rooms, while stream state is shared
+per domain. Notification delivery fans out by domain to the rooms currently
+subscribed to that domain. Live/title notification text is built from the fresh
+status observation and, when available, fresh config metadata for the update
+being processed.
 
 Stream identity is the normalized bare domain. Repositories, metrics,
 notification state, and Owncast API calls all use that domain rather than the
@@ -100,41 +84,43 @@ commands, stream updates, or notifications.
 are represented by new values that are persisted through repositories instead of
 mutating existing objects.
 
-## Service Wiring
+## Plugin Boundary
+
+Maubot interacts with the package through `OwncastSentry`. That plugin class is
+the boundary between Maubot's runtime and the internal services that implement
+OwncastSentry behavior.
 
 `OwncastSentry.start()` is the composition root for one plugin instance. It
-loads config, creates the metrics service, Owncast API client, repositories,
-notification service, stream monitor, subscription manager, and command handler,
-then passes dependencies into each service explicitly.
+loads config, creates the Owncast client, repositories, metrics, notification
+service, stream monitor, subscription manager, and command handler, then passes
+dependencies into each service explicitly.
 
-This keeps lower-level modules independent of Maubot globals. Commands do not
-construct repositories, `StreamMonitor` does not know about the Maubot
-scheduler, and notification delivery does not fetch its own subscription state
-from the plugin instance.
+The plugin boundary owns Maubot integration: command registration, scheduled
+polling, and lifecycle cleanup. Scheduled ticks load subscribed domains and
+call `StreamMonitor.update_all_streams()`. `StreamMonitor` owns the per-stream
+polling workflow, while notification delivery and delivery cooldowns stay in
+`NotificationService`.
 
-The plugin boundary owns scheduling. The minute loop loads subscribed domains
-from `SubscriptionRepository` and calls `StreamMonitor.update_all_streams()`.
-The same pattern applies to new background work: schedule it from the plugin
-boundary, keep the worker service callable directly, and close owned external
-resources from `OwncastSentry.stop()`.
+Internal services do not depend on Maubot globals, which keeps command handling,
+scheduled polling, and tests wired through explicit dependencies.
 
 ## Subscription Management
 
 `SubscriptionManager` coordinates the room-to-domain relationship. Command
 handlers pass it user-supplied stream targets, and it turns those targets into
-normalized domains before touching repository state.
+normalized domains before creating or removing stored data.
 
 Subscribing a room creates a subscription for the normalized domain and creates
-the shared stream row when the domain is first seen. First-time domains are
+the shared stream record when needed. Domains with no current subscribers are
 validated through `OwncastClient`; domains that already have subscribers reuse
 the existing stream record instead of revalidating.
 
 Unsubscribing removes one room's subscription to a domain. It does not delete
-the shared stream row or make remote Owncast requests. Long-term dead stream
-cleanup is owned by `StreamMonitor`.
+the shared stream record or make remote Owncast requests.
 
-Listing methods stay room-scoped. They return the subscriptions relevant to one
-Matrix room, with the shared stream state attached for display.
+Listing methods return the subscriptions for one Matrix room with shared stream
+state attached, so commands can display each instance's name, title, link,
+status, and how long it has been online or offline.
 
 ## Owncast API Client
 
@@ -144,13 +130,12 @@ accepted responses into the value objects used by the rest of the package.
 
 The session uses a plugin-specific User-Agent, a dummy cookie jar, no DNS cache,
 a global connection limit, a per-host connection limit of one, and connect/read
-socket timeouts. aiohttp's own DNS cache is disabled so DNS caching and policy
-stay with the resolver configured for the deployment.
+socket timeouts. aiohttp's own DNS cache is disabled; resolver selection is left
+to aiohttp and the runtime environment.
 
 The per-host connection limit and keepalive settings are intentional. Each
-Owncast instance gets at most one reusable connection, so minute-by-minute
-status checks can reuse the existing TLS session instead of opening a fresh
-connection for every poll.
+Owncast instance is intended to keep at most one long-lived connection warm, so
+minute-by-minute status checks avoid unnecessary TLS renegotiation.
 
 Responses are accepted only when they are HTTP 200 JSON objects under the
 configured size limit. Invalid JSON, non-object JSON, oversized bodies,
@@ -163,147 +148,118 @@ for that domain.
 
 ## Stream Monitoring
 
-`StreamMonitor` owns the core per-domain state machine. `update_stream()`
-compares the stored stream state with the latest Owncast status response,
-decides whether to send a notification, updates persistent state when needed,
-and records stream metrics. Each poll first handles missing rows, polling
-backoff, and failed Owncast requests. Only a valid status response enters the
-stream transition policy. `update_all_streams()` wraps this flow for many
-domains, isolates per-domain exceptions, and records subscription-count metrics.
+`StreamMonitor` runs the package's main polling workflow for tracked Owncast
+instances. `update_stream()` owns the per-domain state machine: it compares the
+stored stream state with the latest Owncast status response, decides whether to
+send a notification, updates persistent state when needed, and records stream
+metrics. Each poll first handles stored stream lookup, polling backoff, and
+failed Owncast requests. Only a valid status response enters the stream transition
+policy. `update_all_streams()` wraps this flow for many domains, isolates
+per-domain exceptions, and records subscription-count metrics.
 
 ```mermaid
 flowchart TD
-    Start["update_stream(domain)"] --> Old["load stored StreamState"]
-    Old --> Missing{"row exists?"}
-    Missing -->|no| Noop["return success"]
-    Missing -->|yes| Backoff{"backoff allows poll?"}
-    Backoff -->|no| Skip["skip HTTP call<br/>increment failure counter"]
-    Skip --> CleanupSkip["run warning/deletion cleanup checks"]
-    CleanupSkip --> MetricsSkip["if row remains, update<br/>status and failure metrics"]
-    MetricsSkip --> SuccessSkip["return success"]
-    Backoff -->|yes| Fetch["fetch and validate /api/status"]
-    Fetch --> Fetched{"got valid state?"}
-    Fetched -->|no| Failure["increment failure counter"]
-    Failure --> CleanupFail["run warning/deletion cleanup checks"]
-    CleanupFail --> MetricsFail["if row remains, update<br/>status and failure metrics"]
-    MetricsFail --> Failed["return failure"]
-    Fetched -->|yes| Reset["reset failure counter and metric"]
-    Reset --> Timer["ensure offline timer<br/>cache entry exists"]
-    Timer --> Transition["classify stream transition"]
-    Transition --> First{"first observation?"}
-    First -->|yes| FirstLog["log suppressed notification"]
+    Start["update_stream(domain)"] --> Stored["load stored stream state"]
+    Stored --> Query{"backoff allows query?"}
+    Query -->|no| Defer["skip query for backoff"]
+    Defer --> Cleanup["apply cleanup policy"]
+    Cleanup --> Done["done"]
+    Query -->|yes| Status["fetch stream status from Owncast"]
+    Status --> Observation{"valid observation?"}
+    Observation -->|no| Failure["record failed check"]
+    Failure --> Cleanup
+    Observation -->|yes| Compare["compare observation with stored state"]
+    Compare --> First{"first observation?"}
+    First -->|yes| FirstNoNotify["no notification"]
     First -->|no| LiveCheck{"went live?"}
-    FirstLog --> ConfigDecision
-    LiveCheck -->|yes| Brief{"observed offline less than<br/>temporary cooldown?"}
-    LiveCheck -->|no| TitleChanged{"title changed<br/>while online?"}
-    Brief -->|no| LiveNotify["go-live notification needed"]
+    LiveCheck -->|yes| Brief{"offline less than 7 minutes?"}
+    Brief -->|no| LiveNotify["select go-live notification"]
     Brief -->|yes| BriefTitle{"title changed?"}
-    BriefTitle -->|yes| BriefNotify["title-change notification needed"]
-    BriefTitle -->|no| NoNotify["no notification"]
-    TitleChanged -->|yes| OfflineMarker{"offline marker newer than<br/>last notification?"}
+    BriefTitle -->|no| BriefNoNotify["no notification"]
+    BriefTitle -->|yes| TitleNotify["select title-change notification"]
+    LiveCheck -->|no| TitleChanged{"title changed while online?"}
+    TitleChanged -->|yes| TitleNotify
     TitleChanged -->|no| WentOffline{"went offline?"}
-    WentOffline -->|yes| Offline["record offline timer"]
-    WentOffline -->|no| NoNotify
-    OfflineMarker -->|yes| ResumeNotify["go-live notification needed"]
-    OfflineMarker -->|no| TitleNotify["title-change notification needed"]
-    NoNotify --> ConfigDecision
-    Offline --> ConfigDecision
-    LiveNotify --> ConfigDecision
-    BriefNotify --> ConfigDecision
-    ResumeNotify --> ConfigDecision
-    TitleNotify --> ConfigDecision
-    ConfigDecision{"notification, first observation,<br/>or hourly refresh?"}
-    ConfigDecision -->|yes| Config["fetch /api/config"]
-    ConfigDecision -->|no| NotifyGate{"notification needed?"}
-    Config --> NotifyGate
-    NotifyGate -->|yes| Send["attempt live/title notification"]
-    NotifyGate -->|no| Save["save stream row<br/>repository ignores unchanged values"]
-    Send --> Save
-    Save --> FinalMetrics["set current status metric"]
-    FinalMetrics --> Done["return success"]
+    WentOffline -->|yes| Offline["record when stream went offline"]
+    WentOffline -->|no| NoNotify["no notification"]
+    FirstNoNotify --> Metadata
+    BriefNoNotify --> Metadata
+    NoNotify --> Metadata
+    Offline --> Metadata
+    LiveNotify --> Metadata
+    TitleNotify --> Metadata
+    Metadata["fetch instance config from Owncast if display metadata is needed"]
+    Metadata --> Notify["attempt sending notification if selected"]
+    Notify --> Save["save stream update"]
+    Save --> Done
 ```
 
-Failure counters drive both status and polling behavior. A stream is displayed
-as unknown when its failure counter is above `UNKNOWN_STATUS_THRESHOLD`.
-Counters 0 through 4 poll every minute; later tiers poll only on selected
-counter values and eventually only every fifteenth minute. Skipped cycles still
-increment the counter so cleanup can progress.
+Each stream has a failure counter that tracks consecutive failed checks and
+queries skipped for backoff. The counter drives both status and polling behavior:
+a stream is displayed as unknown after more than 15 minutes of failed or
+skipped checks, and later failures progressively reduce query frequency until
+the monitor checks only every 15 minutes. Skipped queries still increment
+the counter so cleanup can progress.
 
-Transition decisions use Owncast's `online` field. The stream status timestamp is
-the bot's local UTC observation time for the first successful poll, a missing
-timestamp repair, or an online/offline transition. Owncast's remote connect,
-disconnect, and server timestamps are not required for status parsing.
+After each successful fetch from Owncast's
+[`/api/status`](https://owncast.online/api/latest/#tag/Internal/operation/GetStatus)
+endpoint, the monitor compares the stored stream state with the latest
+observation to identify transitions, such as going online, going offline, or
+changing title. Online/offline transitions are based on Owncast's `online` field.
+The stream status timestamp is the bot's UTC observation time for the first
+successful poll or an online/offline transition.
 
-First observation is special. If a new stream row has no status timestamp, the
-first successful update fetches config and stores state but suppresses
-notification attempts, even if the stream is already live.
+The first successful observation stores state and fetches config but suppresses
+notifications, even if the stream is already live. After that, only
+offline-to-online transitions can select go-live notifications; mid-session
+title changes select title-change notifications.
 
-Go-live notification attempts happen when a stream moves from offline to online
-and the monitor's in-memory offline timer shows it was not merely a brief
-outage. A stream that returns within the temporary offline cooldown only attempts
-a notification when the title changed, and then it uses a title change
-notification.
+Brief outages are treated as transient to avoid spamming Matrix rooms when an
+instance is spotty. They do not select go-live notifications. If a stream returns
+in under seven minutes with the same title, the monitor stores the new online
+state without notifying rooms. If the title changed during that brief outage, the
+monitor selects a title-change notification instead.
 
-Mid-session title changes attempt title change notifications. If the monitor has
-an offline marker that is newer than the last notification, it attempts a normal
-live notification instead so rooms do not see a title change for what is
-effectively a new session.
+Instance config is fetched from Owncast's
+[`/api/config`](https://owncast.online/api/latest/#tag/Internal/operation/GetWebConfig)
+endpoint when a live/title notification is selected, on a stream's first
+successful observation, and during the hourly refresh window for successfully
+polled streams. The config response supplies the display name and tags for
+notifications. If config is fetched successfully during an update, the persisted
+stream name is refreshed from it; otherwise the stored name is left unchanged.
 
-Offline transitions do not notify rooms. They update the database and record a
-monotonic offline timestamp used by later live/title notification policy.
-
-The live/title notification send step is an attempt, not a guaranteed Matrix message.
-`NotificationService` still applies the shared live/title cooldown and records
-the cooldown only when at least one room receives the message.
-
-`/api/config` is fetched when the monitor is about to attempt a live or
-title-change notification, on a stream's first successful observation, and
-during the hourly refresh window for successfully polled streams. The config
-response supplies the display name and tags for notifications. If config is
-fetched successfully during an update, the persisted stream name is refreshed
-from it; otherwise the stored name is left unchanged.
+Selecting a notification does not guarantee a Matrix message. The notification
+service can still suppress delivery when its per-domain live/title cooldown is
+active, which prevents repeated messages from noisy stream state changes. That
+delivery behavior is covered below.
 
 ## Cleanup Policy
 
 A domain that remains unreachable is eventually cleaned up. The failure counter
 represents minute ticks, including skipped backoff ticks.
 
-At the 83-day threshold, `StreamMonitor` sends a cleanup warning to all rooms
-subscribed to the domain. At the 90-day threshold or beyond, it sends a deletion
-notice, deletes all subscriptions for the domain, deletes the stream row, clears
-the monitor and notification caches for that domain, and removes per-domain
-metrics.
-
-```mermaid
-flowchart TD
-    Counter["failure counter after failed or skipped check"] --> Warn{"counter == 83 days?"}
-    Warn -->|yes| Warning["send cleanup warning"]
-    Warn -->|no| Delete
-    Warning --> Delete{"counter >= 90 days?"}
-    Delete -->|no| Done["done"]
-    Delete -->|yes| Notice["send cleanup deletion notice"]
-    Notice --> Subs["delete subscriptions"]
-    Subs --> Stream["delete stream row"]
-    Stream --> Caches["clear local caches"]
-    Caches --> Metrics["remove per-domain metrics"]
-    Metrics --> DoneCleanup["done"]
-```
+After 83 days of continued failed or skipped checks, `StreamMonitor` sends a
+cleanup warning to all rooms subscribed to the domain. After 90 days or more of
+continued failed or skipped checks, it sends a deletion notice, deletes all
+subscriptions for the domain, deletes the stream record, clears the monitor and
+notification caches for that domain, and asks `MetricsService` to remove
+existing per-domain metric labels. The enclosing update cycle may later recreate
+the subscription-count gauge for that domain at zero.
 
 ## Notification Delivery
 
-`NotificationService` sends plain text Matrix messages to every room subscribed
-to a domain. Broadcasts run concurrently and use `asyncio.gather(...,
-return_exceptions=True)` so one failed room does not block delivery to other
-rooms.
+`NotificationService` sends notifications to every room subscribed to a domain.
+Delivery failures are isolated per room, so one failed Matrix send does not
+block notifications to other subscribed rooms.
 
 Live and title-change notifications share a per-domain cooldown. The cooldown
 is recorded only when at least one room receives the message. If there are no
 subscribed rooms, or every delivery fails, no cooldown is recorded.
 
-Notification text is whitespace-normalized before sending. Stream names fall
-back to the domain when config lookup fails or the instance name is empty. Tags
-are appended as hash tags after filtering out empty tags and tags that start
-with a dot.
+Live/title notification text normalizes remote stream metadata before composing
+the message, so instance-provided names, titles, and tags cannot add unexpected
+line breaks or otherwise distort the notification. Messages fall back to the
+domain when a display name is unavailable.
 
 Cleanup warning and deletion notices bypass the live/title cooldown, but still
 record delivery metrics.
@@ -316,33 +272,30 @@ that catch unexpected exceptions and record command error metrics.
 
 `CommandHandler.subscribe()` and `CommandHandler.unsubscribe()` translate
 domain errors into user-facing Matrix replies. `subscriptions()` and `live()`
-read resolved room subscriptions and render Markdown output with escaped
-untrusted text.
+read room subscription listings with stream state attached and render Markdown
+output with escaped untrusted text.
 
-Command listings are room-scoped and ordered by domain through repository
-queries. `subscriptions()` includes online, offline, and unknown streams.
-`live()` includes only rows marked online with a failure count at or below the
-unknown threshold.
+Command listings are limited to the current room and ordered by domain through
+repository queries. `subscriptions()` includes online, offline, and unknown
+streams. `live()` includes only streams marked online with a failure count at or
+below the unknown threshold.
 
 ## Persistence
 
-The database schema is managed by `repository.py` through Maubot's upgrade
-table.
+Maubot owns the database connection and runs the schema upgrades registered by
+`repository.py`. The repository classes wrap that database handle and expose the
+package's stream and subscription persistence operations.
 
-- Revision 1 creates `streams` and `subscriptions`.
-- Revision 2 fixes `subscriptions.stream_domain` from `INTEGER` to `TEXT`.
-- Revision 3 adds `streams.failure_counter`.
-- Revision 4 replaces separate connect/disconnect timestamps with
-  `streams.online` and `streams.status_since`.
-
-Repositories own SQL access. `StreamRepository.update()` writes display
-and state fields; failure counters use dedicated methods.
+The persistence model stores one stream record per normalized domain and one
+subscription row per room/domain pair. `SubscriptionManager` normalizes user
+input before repository calls. `StreamRepository` writes display and state
+fields, while failure counters use dedicated methods.
 `SubscriptionRepository` raises domain-specific errors for duplicate adds and
 missing removes.
 
-Resolved subscription listings join `subscriptions` to `streams`, which means
-orphaned subscription rows without a stream row are skipped in room display
-queries.
+Room subscription listings join `subscriptions` to `streams`, which means
+orphaned subscription entries without a matching stream record are skipped in
+room display queries.
 
 ## Metrics
 
@@ -355,36 +308,10 @@ The registered metrics cover:
 - current stream status per domain (`1` online, `0` offline, `-1` unknown);
 - subscription count per domain;
 - consecutive check failures per domain;
-- last successful Owncast API response duration per domain;
+- successful Owncast API response duration per domain;
 - build/version information;
 - open aiohttp connection count;
 - internal scheduler and command errors.
 
 Known counter label combinations are initialized to zero. This keeps the
 Prometheus output stable before any events have occurred.
-
-## Test Map
-
-Start with these tests when changing package behavior:
-
-- `tests/test_types.py`: immutable value objects, API response shape checks,
-  truncation, stream status derivation, and subscription errors.
-- `tests/test_repository.py`: schema-backed stream and subscription repository
-  behavior.
-- `tests/test_subscription_manager.py`: domain normalization, subscribe and
-  unsubscribe workflows, validation skipping, and room listing delegation.
-- `tests/test_owncast_client.py`: Owncast API request handling, response body
-  limits, validation failures, User-Agent, response timing, and connection
-  counts.
-- `tests/test_stream_monitor.py`: polling backoff, first-update suppression,
-  live/offline/title transitions, cleanup thresholds, exception isolation, and
-  monitor metrics.
-- `tests/test_notification_service.py`: message formatting, sanitization,
-  cooldown behavior, broadcast failure accounting, cleanup notices, and
-  notification metrics.
-- `tests/test_commands.py`: end-to-end Maubot command behavior, Markdown
-  escaping, duration formatting, room-scoped subscription listings, and live
-  listings.
-- `tests/test_metrics.py`: Prometheus counters, gauges, response timer,
-  per-domain label removal, build info, open connections, and isolated registry
-  output.

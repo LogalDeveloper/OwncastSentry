@@ -37,7 +37,7 @@ jobs:
           grep "^version:" maubot.yaml
 
       - name: Build plugin
-        run: 7z a -tzip -mx=9 -xr!__pycache__ owncastsentry-v${{ steps.metadata.outputs.version }}.mbp owncastsentry/ maubot.yaml base-config.yaml LICENSE.txt
+        run: 7z a -tzip -mx=9 -xr!__pycache__ -xr!README.md owncastsentry-v${{ steps.metadata.outputs.version }}.mbp owncastsentry/ maubot.yaml base-config.yaml LICENSE.txt
 
       - name: Print artifact checksums
         run: |
