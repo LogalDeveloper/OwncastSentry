@@ -457,32 +457,6 @@ class TestClassifyNotification:
 
         assert notification_kind is _NotificationKind.TITLE_CHANGE
 
-    def test_went_offline_after_last_notification_notifies_live(self) -> None:
-        """Notify live when stream went offline after the last notification."""
-        old_state = StreamState(
-            domain="example.com",
-            title="Old",
-            online=True,
-            status_since="2026-01-01T10:00:00+00:00",
-        )
-        observation = _stream_observation(
-            domain="example.com",
-            title="New",
-            online=True,
-            observed_at="2026-01-01T12:00:00+00:00",
-        )
-        transition = _classify_transition(old_state, observation)
-
-        notification_kind = _classify_notification(
-            transition,
-            old_state,
-            observation,
-            went_offline_after_last_notification=True,
-        )
-
-        assert notification_kind is _NotificationKind.LIVE
-
-
 class TestUpdateAllStreams:
     """Parallel stream update orchestration."""
 
@@ -959,12 +933,12 @@ class TestUpdateStreamTitleChange:
         )
         assert owncast.config_call_count == 1
 
-    async def test_sends_go_live_when_last_notification_before_offline(
+    async def test_sends_title_change_after_offline_gap(
         self,
         stream_repo: StreamRepository,
         subscription_repo: SubscriptionRepository,
     ) -> None:
-        """Send go-live instead of title-change after an offline gap."""
+        """Send title-change when an already-online stream changes title."""
         owncast = _StubOwncastClient(
             stream_state=_stream_observation(
                 domain="title.com",
@@ -991,8 +965,8 @@ class TestUpdateStreamTitleChange:
             status_since="2026-01-01T12:00:00+00:00",
         )
 
-        # Offline timer is MORE recent than last notification,
-        # and both are old enough to pass rate limiting
+        # Offline timer is more recent than the last notification, but title
+        # changes remain title changes once the stream is already online.
         now = time.monotonic()
         monitor.offline_timer_cache["title.com"] = (
             now - _SECONDS_BETWEEN_NOTIFICATIONS - 100
@@ -1005,7 +979,7 @@ class TestUpdateStreamTitleChange:
         assert result is True
         assert len(client.sent_messages) == 1
         assert client.sent_messages[0].content.body == (
-            "🎥 Title Stream is now live!\n"
+            "📝 Title Stream has changed its stream title!\n"
             "Stream Title: Updated Title\n"
             "\n"
             "To tune in, visit: https://title.com/"

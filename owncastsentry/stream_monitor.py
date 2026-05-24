@@ -134,12 +134,11 @@ def _classify_notification(
     observation: StreamStateObservation,
     *,
     offline_duration_seconds: int | None = None,
-    went_offline_after_last_notification: bool = False,
 ) -> _NotificationKind:
     """Classify the live/title notification policy for a transition.
 
-    The caller supplies timing context because it comes from the monitor's
-    monotonic offline cache and notification-service cache, not the transition.
+    The caller supplies offline duration because it comes from the monitor's
+    monotonic offline cache, not the transition.
     """
     match transition.kind:
         case _StreamTransitionKind.WENT_LIVE:
@@ -153,8 +152,6 @@ def _classify_notification(
             return _NotificationKind.LIVE
 
         case _StreamTransitionKind.TITLE_CHANGED:
-            if went_offline_after_last_notification:
-                return _NotificationKind.LIVE
             return _NotificationKind.TITLE_CHANGE
 
         case _:
@@ -314,7 +311,6 @@ class StreamMonitor:
         # Notification policy may need runtime timing context in addition to
         # the stored state and latest observation.
         offline_duration_seconds: int | None = None
-        went_offline_after_last_notification = False
 
         match transition.kind:
             case _StreamTransitionKind.FIRST_OBSERVATION:
@@ -343,11 +339,6 @@ class StreamMonitor:
                     )
             case _StreamTransitionKind.TITLE_CHANGED:
                 self.log.info("[%s] Stream title was changed!", domain)
-                # If we saw an offline event after the last notification, send
-                # a go-live notice instead of only a title-change notice.
-                went_offline_after_last_notification = self.offline_timer_cache[
-                    domain
-                ] > self.notification_service.get_last_notification_time(domain)
             case _StreamTransitionKind.WENT_OFFLINE:
                 self.offline_timer_cache[domain] = time.monotonic()
                 self.log.info("[%s] Stream is now offline.", domain)
@@ -359,7 +350,6 @@ class StreamMonitor:
             old_state,
             observation,
             offline_duration_seconds=offline_duration_seconds,
-            went_offline_after_last_notification=went_offline_after_last_notification,
         )
 
         stream_config: StreamConfigObservation | None = None
