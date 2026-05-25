@@ -102,7 +102,6 @@ class OwncastSentry(Plugin):
         # Initialize subscription manager
         self.subscription_manager = SubscriptionManager(
             self.owncast_client,
-            self.stream_repo,
             self.subscription_repo,
             self.log,
         )

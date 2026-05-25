@@ -54,13 +54,11 @@ def owncast_client() -> _StubOwncastClient:
 @pytest.fixture
 def manager(
     owncast_client: _StubOwncastClient,
-    stream_repo: StreamRepository,
     subscription_repo: SubscriptionRepository,
 ) -> SubscriptionManager:
     """SubscriptionManager built directly for unit tests."""
     return SubscriptionManager(
         owncast_client=owncast_client,  # type: ignore[arg-type]
-        stream_repo=stream_repo,
         subscription_repo=subscription_repo,
         logger=logging.getLogger("test"),
     )
@@ -125,7 +123,7 @@ class TestManagerSubscribe:
 
         assert domain == "stream.example"
         assert owncast_client.validated_domains == ["stream.example"]
-        assert await stream_repo.exists("stream.example") is True
+        assert await stream_repo.get_by_domain("stream.example") is not None
         assert await subscription_repo.get_subscribed_rooms("stream.example") == [
             "!room:example.com"
         ]
@@ -145,7 +143,7 @@ class TestManagerSubscribe:
 
         assert exc_info.value.domain == "bad.example"
         assert owncast_client.validated_domains == ["bad.example"]
-        assert await stream_repo.exists("bad.example") is False
+        assert await stream_repo.get_by_domain("bad.example") is None
         assert await subscription_repo.get_subscribed_rooms("bad.example") == []
 
     async def test_duplicate_subscription_raises(
@@ -193,15 +191,35 @@ class TestManagerUnsubscribe:
     async def test_removes_existing_subscription(
         self,
         manager: SubscriptionManager,
+        stream_repo: StreamRepository,
         subscription_repo: SubscriptionRepository,
     ) -> None:
-        """Existing room subscription is removed and its domain is returned."""
+        """Last subscription removal deletes the stream row."""
         await manager.subscribe("!room:example.com", "stream.example")
 
         domain = await manager.unsubscribe("!room:example.com", "stream.example")
 
         assert domain == "stream.example"
+        assert await stream_repo.get_by_domain("stream.example") is None
         assert await subscription_repo.get_subscribed_rooms("stream.example") == []
+
+    async def test_keeps_stream_for_remaining_subscriptions(
+        self,
+        manager: SubscriptionManager,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Do not delete stream state while another room is still subscribed."""
+        await manager.subscribe("!room1:example.com", "stream.example")
+        await manager.subscribe("!room2:example.com", "stream.example")
+
+        domain = await manager.unsubscribe("!room1:example.com", "stream.example")
+
+        assert domain == "stream.example"
+        assert await stream_repo.get_by_domain("stream.example") is not None
+        assert await subscription_repo.get_subscribed_rooms("stream.example") == [
+            "!room2:example.com"
+        ]
 
     async def test_missing_subscription_raises(
         self,
@@ -223,13 +241,12 @@ class TestManagerListings:
         stream_repo: StreamRepository,
         subscription_repo: SubscriptionRepository,
     ) -> None:
-        """Return sorted room subscriptions and skip missing stream rows."""
+        """Return sorted room subscriptions."""
         await stream_repo.create("beta.example")
         await stream_repo.update("beta.example", name="Beta")
         await stream_repo.create("alpha.example")
         await stream_repo.update("alpha.example", name="Alpha")
         await subscription_repo.add("beta.example", "!room:example.com")
-        await subscription_repo.add("missing.example", "!room:example.com")
         await subscription_repo.add("alpha.example", "!room:example.com")
 
         subscriptions = await manager.list_room_subscriptions("!room:example.com")

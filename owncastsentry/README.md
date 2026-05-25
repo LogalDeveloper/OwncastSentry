@@ -110,13 +110,15 @@ scheduled polling, and tests wired through explicit dependencies.
 handlers pass it user-supplied stream targets, and it turns those targets into
 normalized domains before creating or removing stored data.
 
-Subscribing a room creates a subscription for the normalized domain and creates
-the shared stream record when needed. Domains with no current subscribers are
-validated through `OwncastClient`; domains that already have subscribers reuse
-the existing stream record instead of revalidating.
+Subscribing a room validates domains with no current subscribers through
+`OwncastClient`, then inserts a subscription for the normalized domain. SQLite
+creates the shared stream record from that subscription insert when needed.
+Domains that already have subscribers reuse the existing stream record instead
+of revalidating.
 
-Unsubscribing removes one room's subscription to a domain. It does not delete
-the shared stream record or make remote Owncast requests.
+Unsubscribing removes one room's subscription to a domain. When the last
+subscription for a domain is removed, SQLite deletes the shared stream record.
+Unsubscribe does not make remote Owncast requests.
 
 Listing methods return the subscriptions for one Matrix room with shared stream
 state attached, so commands can display each instance's name, title, link,
@@ -287,15 +289,18 @@ Maubot owns the database connection and runs the schema upgrades registered by
 package's stream and subscription persistence operations.
 
 The persistence model stores one stream record per normalized domain and one
-subscription row per room/domain pair. `SubscriptionManager` normalizes user
-input before repository calls. `StreamRepository` writes display and state
-fields, while failure counters use dedicated methods.
+subscription row per room/domain pair. SQLite constraints enforce non-empty
+identifiers, unique room/domain subscriptions, and subscription ownership by a
+stream record. `SubscriptionManager` normalizes user input before repository
+calls. `StreamRepository` writes display and state fields, while failure
+counters use dedicated methods.
 `SubscriptionRepository` raises domain-specific errors for duplicate adds and
 missing removes.
 
-Room subscription listings join `subscriptions` to `streams`, which means
-orphaned subscription entries without a matching stream record are skipped in
-room display queries.
+Subscription inserts create missing stream rows through a SQLite trigger, and
+deleting the last subscription for a domain deletes its stream row. Deleting a
+stream cascades to its subscriptions through SQLite, so cleanup only has to
+remove the stream record after user notifications are sent.
 
 ## Metrics
 

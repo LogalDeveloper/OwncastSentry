@@ -457,6 +457,7 @@ class TestClassifyNotification:
 
         assert notification_kind is _NotificationKind.TITLE_CHANGE
 
+
 class TestUpdateAllStreams:
     """Parallel stream update orchestration."""
 

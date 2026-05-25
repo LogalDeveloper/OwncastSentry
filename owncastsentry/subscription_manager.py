@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     import logging
 
     from .owncast_client import OwncastClient
-    from .repository import StreamRepository, SubscriptionRepository
+    from .repository import SubscriptionRepository
 
 
 _DOMAIN_CLEANUP_RE = re.compile(r"[^a-z0-9.-]")
@@ -55,18 +55,19 @@ class SubscriptionManager:
     def __init__(
         self,
         owncast_client: OwncastClient,
-        stream_repo: StreamRepository,
         subscription_repo: SubscriptionRepository,
         logger: logging.Logger,
     ) -> None:
         """Initialize the subscription manager."""
         self.owncast_client = owncast_client
-        self.stream_repo = stream_repo
         self.subscription_repo = subscription_repo
         self.log = logger
 
     async def subscribe(self, room_id: str, url: str) -> str:
         """Subscribe a room to stream notifications and return the stream domain.
+
+        First subscriptions validate the remote Owncast instance before the
+        subscription insert creates the shared stream row through SQLite.
 
         :param room_id: Matrix room ID to subscribe.
         :param url: User-supplied Owncast URL, domain, or Fediverse-style address.
@@ -76,22 +77,26 @@ class SubscriptionManager:
         """
         stream_domain = _domainify(url)
 
-        subscription_count = await self.subscription_repo.count_by_domain(stream_domain)
-        if subscription_count == 0:
+        is_new_domain = not await self.subscription_repo.has_domain_subscriptions(
+            stream_domain
+        )
+        if is_new_domain:
             is_valid = await self.owncast_client.validate_instance(stream_domain)
             if not is_valid:
                 raise InvalidOwncastInstanceError(stream_domain)
 
         await self.subscription_repo.add(stream_domain, room_id)
 
-        if await self.stream_repo.create(stream_domain):
+        if is_new_domain:
             self.log.info("[%s] Discovered new stream!", stream_domain)
-
         self.log.info("[%s] Subscription added for room %s.", stream_domain, room_id)
         return stream_domain
 
     async def unsubscribe(self, room_id: str, url: str) -> str:
         """Remove a room subscription and return the stream domain.
+
+        When this removes the last subscription for a stream, SQLite deletes the
+        stream row through the subscription cleanup trigger.
 
         :param room_id: Matrix room ID to unsubscribe.
         :param url: User-supplied Owncast URL, domain, or Fediverse-style address.

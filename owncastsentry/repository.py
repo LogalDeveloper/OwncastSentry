@@ -192,13 +192,134 @@ async def upgrade_v4(conn: Connection) -> None:
     await conn.execute("ALTER TABLE streams_new RENAME TO streams")
 
 
+@upgrade_table.register(  # type: ignore[arg-type, call-arg, untyped-decorator]
+    description="Formalize stream and subscription constraints"
+)
+async def upgrade_v5(conn: Connection) -> None:
+    """Upgrade database schema to version 5 format.
+
+    Rebuilds the current tables with explicit SQLite constraints, keeps only
+    stream rows that have valid subscriptions, and creates placeholder stream
+    rows for legacy subscriptions before adding the subscription-to-stream
+    foreign key.
+
+    Subscription inserts create their stream parent row in a trigger before the
+    foreign key is checked. Stream deletions cascade to dependent subscriptions.
+    Subscription deletions also run a trigger that removes the stream row once
+    no subscriptions remain.
+
+    :param conn: A connection to run the v5 database migration on.
+    """
+    await conn.execute(
+        """CREATE TABLE "streams_new" (
+            "domain" TEXT NOT NULL CHECK(length(trim("domain")) > 0),
+            "name" TEXT,
+            "title" TEXT,
+            "online" INTEGER NOT NULL DEFAULT 0 CHECK("online" IN (0, 1)),
+            "status_since" TEXT,
+            "failure_counter" INTEGER NOT NULL DEFAULT 0
+                CHECK("failure_counter" >= 0),
+            PRIMARY KEY("domain")
+        )"""
+    )
+
+    await conn.execute(
+        """INSERT INTO streams_new (
+               domain, name, title, online, status_since, failure_counter
+           )
+           SELECT domain,
+                  name,
+                  title,
+                  CASE WHEN online THEN 1 ELSE 0 END,
+                  status_since,
+                  CASE
+                      WHEN failure_counter IS NULL OR failure_counter < 0 THEN 0
+                      ELSE failure_counter
+                  END
+           FROM streams
+           WHERE domain IS NOT NULL
+             AND length(trim(domain)) > 0
+             AND EXISTS (
+                 SELECT 1
+                 FROM subscriptions
+                 WHERE subscriptions.stream_domain = streams.domain
+                   AND subscriptions.room_id IS NOT NULL
+                   AND length(trim(subscriptions.room_id)) > 0
+             )"""
+    )
+
+    await conn.execute(
+        """INSERT OR IGNORE INTO streams_new (domain)
+           SELECT DISTINCT stream_domain
+           FROM subscriptions
+           WHERE stream_domain IS NOT NULL
+             AND length(trim(stream_domain)) > 0
+             AND room_id IS NOT NULL
+             AND length(trim(room_id)) > 0"""
+    )
+
+    await conn.execute("DROP TABLE streams")
+    await conn.execute("ALTER TABLE streams_new RENAME TO streams")
+
+    await conn.execute(
+        """CREATE TABLE "subscriptions_new" (
+            "stream_domain" TEXT NOT NULL
+                CHECK(length(trim("stream_domain")) > 0),
+            "room_id" TEXT NOT NULL CHECK(length(trim("room_id")) > 0),
+            PRIMARY KEY("room_id", "stream_domain"),
+            FOREIGN KEY("stream_domain")
+                REFERENCES "streams"("domain")
+                ON DELETE CASCADE
+        )"""
+    )
+
+    await conn.execute(
+        """INSERT INTO subscriptions_new (stream_domain, room_id)
+           SELECT stream_domain, room_id
+           FROM subscriptions
+           WHERE stream_domain IS NOT NULL
+             AND length(trim(stream_domain)) > 0
+             AND room_id IS NOT NULL
+             AND length(trim(room_id)) > 0"""
+    )
+
+    await conn.execute("DROP TABLE subscriptions")
+    await conn.execute("ALTER TABLE subscriptions_new RENAME TO subscriptions")
+    await conn.execute(
+        """CREATE INDEX "subscriptions_stream_domain_idx"
+           ON "subscriptions"("stream_domain")"""
+    )
+    await conn.execute(
+        """CREATE TRIGGER "create_stream_for_subscription"
+           BEFORE INSERT ON "subscriptions"
+           BEGIN
+               INSERT INTO "streams" ("domain")
+               VALUES (NEW."stream_domain")
+               ON CONFLICT("domain") DO NOTHING;
+           END"""
+    )
+    await conn.execute(
+        """CREATE TRIGGER "delete_unsubscribed_stream"
+           AFTER DELETE ON "subscriptions"
+           WHEN NOT EXISTS (
+               SELECT 1
+               FROM "subscriptions"
+               WHERE "stream_domain" = OLD."stream_domain"
+           )
+           BEGIN
+               DELETE FROM "streams"
+               WHERE "domain" = OLD."stream_domain";
+           END"""
+    )
+
+
 def get_upgrade_table() -> UpgradeTable:
     """Return the repository upgrade table with registered migrations."""
     return upgrade_table
 
 
 class StreamRepository:
-    """Repository for managing stream data in the database."""
+    """Repository for stream parent rows and persisted stream state."""
 
     def __init__(self, database: Database) -> None:
         """Initialize the stream repository.
@@ -209,6 +330,10 @@ class StreamRepository:
 
     async def create(self, domain: str) -> bool:
         """Create a new stream entry in the database.
+
+        Subscription inserts also create stream rows through a SQLite trigger;
+        this explicit create method is for workflows that need a stream row
+        before any subscription is inserted.
 
         :param domain: The stream domain.
         :return: True if created, False if the stream already existed.
@@ -230,15 +355,6 @@ class StreamRepository:
         async with self.db.acquire() as conn:
             row = await conn.fetchrow(query, domain)
             return StreamState.from_db_row(row) if row else None
-
-    async def exists(self, domain: str) -> bool:
-        """Check if a stream exists in the database.
-
-        :param domain: The stream domain.
-        :return: True if exists, False otherwise.
-        """
-        result = await self.get_by_domain(domain)
-        return result is not None
 
     async def update(
         self,
@@ -302,6 +418,8 @@ class StreamRepository:
     async def delete(self, domain: str) -> None:
         """Delete a stream record from the database.
 
+        SQLite cascades the delete to all subscriptions for the stream.
+
         :param domain: The stream domain.
         """
         query = "DELETE FROM streams WHERE domain=$1"
@@ -332,7 +450,7 @@ class StreamRepository:
 
 
 class SubscriptionRepository:
-    """Repository for managing stream subscriptions in the database."""
+    """Repository for subscriptions and their database-owned stream rows."""
 
     def __init__(self, database: Database) -> None:
         """Initialize the subscription repository.
@@ -343,6 +461,10 @@ class SubscriptionRepository:
 
     async def add(self, domain: str, room_id: str) -> None:
         """Add a subscription for a room to a stream.
+
+        SQLite creates the stream parent row in a trigger before enforcing the
+        subscription foreign key. Callers must validate first subscriptions
+        before inserting untrusted domains.
 
         :param domain: The stream domain.
         :param room_id: The Matrix room ID.
@@ -359,6 +481,9 @@ class SubscriptionRepository:
     async def remove(self, domain: str, room_id: str) -> None:
         """Remove a subscription for a room from a stream.
 
+        SQLite removes the stream row through a trigger when this deletes the
+        last subscription for the domain.
+
         :param domain: The stream domain.
         :param room_id: The Matrix room ID.
         :raises NotSubscribedError: If no subscription exists.
@@ -368,17 +493,6 @@ class SubscriptionRepository:
             result = await conn.execute(query, domain, room_id)
             if int(result.rowcount) == 0:
                 raise NotSubscribedError(domain)
-
-    async def delete_all_for_domain(self, domain: str) -> int:
-        """Delete all subscriptions for a given stream domain.
-
-        :param domain: The stream domain.
-        :return: Number of subscriptions deleted.
-        """
-        query = "DELETE FROM subscriptions WHERE stream_domain=$1"
-        async with self.db.acquire() as conn:
-            result = await conn.execute(query, domain)
-            return int(result.rowcount)
 
     async def get_subscribed_rooms(self, domain: str) -> list[str]:
         """Get all room IDs subscribed to a stream.
@@ -391,16 +505,12 @@ class SubscriptionRepository:
             results = await conn.fetch(query, domain)
             return [row["room_id"] for row in results]
 
-    async def get_subscribed_streams_for_room(self, room_id: str) -> list[str]:
-        """Get all stream domains that a room is subscribed to.
-
-        :param room_id: The Matrix room ID.
-        :return: List of stream domains.
-        """
-        query = "SELECT stream_domain FROM subscriptions WHERE room_id=$1"
+    async def has_domain_subscriptions(self, domain: str) -> bool:
+        """Check whether a stream domain has any subscriptions."""
+        query = "SELECT 1 FROM subscriptions WHERE stream_domain=$1 LIMIT 1"
         async with self.db.acquire() as conn:
-            results = await conn.fetch(query, room_id)
-            return [row["stream_domain"] for row in results]
+            result = await conn.fetchrow(query, domain)
+            return result is not None
 
     async def has_room_subscriptions(self, room_id: str) -> bool:
         """Check whether a room has any subscriptions."""
@@ -419,7 +529,7 @@ class SubscriptionRepository:
                    FROM subscriptions
                    JOIN streams ON streams.domain = subscriptions.stream_domain
                    WHERE subscriptions.room_id=$1
-                   ORDER BY streams.domain"""
+                   ORDER BY subscriptions.stream_domain"""
         async with self.db.acquire() as conn:
             results = await conn.fetch(query, room_id)
             return [
@@ -438,7 +548,7 @@ class SubscriptionRepository:
                    WHERE subscriptions.room_id=$1
                      AND streams.online=true
                      AND streams.failure_counter <= $2
-                   ORDER BY streams.domain"""
+                   ORDER BY subscriptions.stream_domain"""
         async with self.db.acquire() as conn:
             results = await conn.fetch(query, room_id, UNKNOWN_STATUS_THRESHOLD)
             return [
@@ -459,17 +569,6 @@ class SubscriptionRepository:
             results = await conn.fetch(query)
             return [row["stream_domain"] for row in results]
 
-    async def count_by_domain(self, domain: str) -> int:
-        """Count the number of subscriptions for a given stream domain.
-
-        :param domain: The stream domain.
-        :return: Number of subscriptions.
-        """
-        query = "SELECT COUNT(*) FROM subscriptions WHERE stream_domain=$1"
-        async with self.db.acquire() as conn:
-            result = await conn.fetchrow(query, domain)
-            return int(result[0])
-
     async def count_by_domains(self, domains: list[str]) -> dict[str, int]:
         """Count subscriptions for each requested stream domain.
 
@@ -480,11 +579,16 @@ class SubscriptionRepository:
             return {}
 
         counts = dict.fromkeys(domains, 0)
+        placeholders = ", ".join(f"${index}" for index in range(1, len(counts) + 1))
         query = """SELECT stream_domain, COUNT(*) AS subscription_count
                    FROM subscriptions
+                   WHERE stream_domain IN ({placeholders})
                    GROUP BY stream_domain"""
         async with self.db.acquire() as conn:
-            results = await conn.fetch(query)
+            results = await conn.fetch(
+                query.format(placeholders=placeholders),
+                *counts,
+            )
 
         for row in results:
             domain = row["stream_domain"]

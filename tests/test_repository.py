@@ -14,11 +14,15 @@
 
 """Tests for database repository classes."""
 
+import sqlite3
+from contextlib import closing
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
+from mautrix.util.async_db import Database
 
-from owncastsentry.repository import _normalize_legacy_status_since
+from owncastsentry.repository import _normalize_legacy_status_since, get_upgrade_table
 from owncastsentry.types import (
     UNKNOWN_STATUS_THRESHOLD,
     AlreadySubscribedError,
@@ -26,7 +30,7 @@ from owncastsentry.types import (
 )
 
 if TYPE_CHECKING:
-    from mautrix.util.async_db import Database
+    from pathlib import Path
 
     from owncastsentry.repository import StreamRepository, SubscriptionRepository
 
@@ -48,6 +52,576 @@ class TestStreamSchema:
             "online",
             "status_since",
             "failure_counter",
+        ]
+
+    async def test_stream_constraint_metadata(self, database: Database) -> None:
+        """Declare stream primary key and non-null constrained columns."""
+        async with database.acquire() as conn:
+            rows = await conn.fetch("PRAGMA table_info(streams)")
+            columns = {row["name"]: row for row in rows}
+
+            assert columns["domain"]["pk"] == 1
+            assert columns["domain"]["notnull"] == 1
+            assert columns["online"]["notnull"] == 1
+            assert columns["failure_counter"]["notnull"] == 1
+
+    @pytest.mark.parametrize(
+        ("query", "params"),
+        [
+            pytest.param(
+                "INSERT INTO streams (domain) VALUES ($1)",
+                (None,),
+                id="null-domain",
+            ),
+            pytest.param(
+                "INSERT INTO streams (domain) VALUES ($1)",
+                ("",),
+                id="blank-domain",
+            ),
+            pytest.param(
+                "INSERT INTO streams (domain) VALUES ($1)",
+                ("   ",),
+                id="whitespace-domain",
+            ),
+            pytest.param(
+                "INSERT INTO streams (domain, online) VALUES ($1, $2)",
+                ("bad-online.example", 2),
+                id="invalid-online",
+            ),
+            pytest.param(
+                """INSERT INTO streams (domain, failure_counter)
+                   VALUES ($1, $2)""",
+                ("bad-counter.example", -1),
+                id="negative-failure-counter",
+            ),
+        ],
+    )
+    async def test_rejects_invalid_stream_values(
+        self,
+        database: Database,
+        query: str,
+        params: tuple[object, ...],
+    ) -> None:
+        """Reject stream rows that violate current value constraints."""
+        async with database.acquire() as conn:
+            with pytest.raises(sqlite3.IntegrityError):
+                await conn.execute(query, *params)
+
+
+class TestSubscriptionSchema:
+    """Subscriptions table schema after migrations."""
+
+    async def test_subscription_constraint_metadata(self, database: Database) -> None:
+        """Declare subscription key, foreign key, index, and lifecycle triggers."""
+        async with database.acquire() as conn:
+            rows = await conn.fetch("PRAGMA table_info(subscriptions)")
+            columns = {row["name"]: row for row in rows}
+            foreign_keys = await conn.fetch("PRAGMA foreign_key_list(subscriptions)")
+            indexes = await conn.fetch("PRAGMA index_list(subscriptions)")
+            index_names = {row["name"] for row in indexes}
+            domain_index_columns = await conn.fetch(
+                "PRAGMA index_info(subscriptions_stream_domain_idx)"
+            )
+            triggers = await conn.fetch(
+                "SELECT name FROM sqlite_schema WHERE type='trigger'"
+            )
+            trigger_names = {row["name"] for row in triggers}
+
+            assert columns["room_id"]["pk"] == 1
+            assert columns["stream_domain"]["pk"] == 2
+            assert columns["room_id"]["notnull"] == 1
+            assert columns["stream_domain"]["notnull"] == 1
+            assert "subscriptions_stream_domain_idx" in index_names
+            assert [row["name"] for row in domain_index_columns] == ["stream_domain"]
+            assert len(foreign_keys) == 1
+            assert foreign_keys[0]["table"] == "streams"
+            assert foreign_keys[0]["from"] == "stream_domain"
+            assert foreign_keys[0]["to"] == "domain"
+            assert foreign_keys[0]["on_delete"] == "CASCADE"
+            assert "create_stream_for_subscription" in trigger_names
+            assert "delete_unsubscribed_stream" in trigger_names
+
+    @pytest.mark.parametrize(
+        ("stream_domain", "room_id"),
+        [
+            pytest.param(None, "!null-domain:example.com", id="null-domain"),
+            pytest.param("", "!blank-domain:example.com", id="blank-domain"),
+            pytest.param("   ", "!blank-domain:example.com", id="whitespace-domain"),
+            pytest.param("example.com", None, id="null-room"),
+            pytest.param("example.com", "", id="blank-room"),
+            pytest.param("example.com", "   ", id="whitespace-room"),
+        ],
+    )
+    async def test_rejects_invalid_subscription_values(
+        self,
+        database: Database,
+        stream_domain: str | None,
+        room_id: str | None,
+    ) -> None:
+        """Reject subscription rows that violate current constraints."""
+        async with database.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO streams (domain) VALUES ($1)",
+                "example.com",
+            )
+
+            with pytest.raises(sqlite3.IntegrityError):
+                await conn.execute(
+                    """INSERT INTO subscriptions (stream_domain, room_id)
+                       VALUES ($1, $2)""",
+                    stream_domain,
+                    room_id,
+                )
+
+    async def test_subscription_insert_creates_stream_parent(
+        self, database: Database
+    ) -> None:
+        """Create the stream parent row from the subscription insert trigger."""
+        async with database.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO subscriptions (stream_domain, room_id)
+                   VALUES ($1, $2)""",
+                "missing.example",
+                "!room:example.com",
+            )
+            stream = await conn.fetchrow(
+                "SELECT * FROM streams WHERE domain=$1",
+                "missing.example",
+            )
+
+        assert stream is not None
+        assert stream["online"] == 0
+        assert stream["failure_counter"] == 0
+
+    async def test_subscription_insert_rolls_back_created_stream_on_failure(
+        self, database: Database
+    ) -> None:
+        """Roll back the trigger-created stream when the subscription is invalid."""
+        async with database.acquire() as conn:
+            with pytest.raises(sqlite3.IntegrityError):
+                await conn.execute(
+                    """INSERT INTO subscriptions (stream_domain, room_id)
+                       VALUES ($1, $2)""",
+                    "rollback.example",
+                    "",
+                )
+
+            stream = await conn.fetchrow(
+                "SELECT * FROM streams WHERE domain=$1",
+                "rollback.example",
+            )
+            subscription = await conn.fetchrow(
+                """SELECT * FROM subscriptions
+                   WHERE stream_domain=$1""",
+                "rollback.example",
+            )
+
+        assert stream is None
+        assert subscription is None
+
+    async def test_subscription_primary_key_rejects_duplicates(
+        self, database: Database
+    ) -> None:
+        """Reject duplicate room/domain subscription rows."""
+        async with database.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO streams (domain) VALUES ($1)",
+                "example.com",
+            )
+            await conn.execute(
+                """INSERT INTO subscriptions (stream_domain, room_id)
+                   VALUES ($1, $2)""",
+                "example.com",
+                "!room:example.com",
+            )
+
+            with pytest.raises(sqlite3.IntegrityError):
+                await conn.execute(
+                    """INSERT INTO subscriptions (stream_domain, room_id)
+                       VALUES ($1, $2)""",
+                    "example.com",
+                    "!room:example.com",
+                )
+
+
+class TestSubscriptionLifecycleConstraints:
+    """Database-owned cleanup behavior between streams and subscriptions."""
+
+    async def test_stream_delete_cascades_subscriptions(
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Delete dependent subscription rows when a stream is deleted."""
+        await stream_repo.create("example.com")
+        await subscription_repo.add("example.com", "!room:example.com")
+
+        await stream_repo.delete("example.com")
+
+        assert await subscription_repo.get_subscribed_rooms("example.com") == []
+
+    async def test_last_subscription_delete_removes_stream(
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Delete the stream row when its last subscription is removed."""
+        await stream_repo.create("example.com")
+        await subscription_repo.add("example.com", "!room:example.com")
+
+        await subscription_repo.remove("example.com", "!room:example.com")
+
+        assert await stream_repo.get_by_domain("example.com") is None
+
+    async def test_subscription_delete_keeps_stream_with_remaining_rooms(
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Keep stream state while at least one subscription remains."""
+        await stream_repo.create("example.com")
+        await subscription_repo.add("example.com", "!room1:example.com")
+        await subscription_repo.add("example.com", "!room2:example.com")
+
+        await subscription_repo.remove("example.com", "!room1:example.com")
+
+        assert await stream_repo.get_by_domain("example.com") is not None
+        assert await subscription_repo.get_subscribed_rooms("example.com") == [
+            "!room2:example.com"
+        ]
+
+
+class TestConstraintMigration:
+    """Migration behavior for legacy data that did not have constraints."""
+
+    async def test_converts_legacy_status_timestamps_from_v3(
+        self, tmp_path: Path
+    ) -> None:
+        """Convert legacy connect/disconnect timestamps during v4 migration."""
+        db_path = tmp_path / "legacy.db"
+        with closing(sqlite3.connect(db_path)) as conn, conn:
+            conn.executescript(
+                """
+                CREATE TABLE version (version INTEGER PRIMARY KEY);
+                INSERT INTO version (version) VALUES (3);
+
+                CREATE TABLE streams (
+                    domain TEXT NOT NULL UNIQUE,
+                    name TEXT,
+                    title TEXT,
+                    last_connect_time TEXT,
+                    last_disconnect_time TEXT,
+                    failure_counter INTEGER DEFAULT 0,
+                    PRIMARY KEY(domain)
+                );
+
+                CREATE TABLE subscriptions (
+                    stream_domain TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    UNIQUE(room_id, stream_domain)
+                );
+
+                INSERT INTO streams (
+                    domain,
+                    last_connect_time,
+                    last_disconnect_time,
+                    failure_counter
+                )
+                VALUES
+                    (
+                        'live.example',
+                        '2026-05-21T19:06:24Z',
+                        '2026-05-20T00:00:00+00:00',
+                        2
+                    ),
+                    (
+                        'offline.example',
+                        NULL,
+                        '2026-05-17T21:23:27-04:00',
+                        3
+                    ),
+                    (
+                        'blank-connect.example',
+                        '',
+                        '2026-05-20T12:34:56+02:00',
+                        4
+                    ),
+                    (
+                        'invalid-timestamp.example',
+                        NULL,
+                        'not a timestamp',
+                        5
+                    );
+
+                INSERT INTO subscriptions (stream_domain, room_id)
+                VALUES
+                    ('live.example', '!live:example.com'),
+                    ('offline.example', '!offline:example.com'),
+                    ('blank-connect.example', '!blank:example.com'),
+                    ('invalid-timestamp.example', '!invalid:example.com');
+                """
+            )
+
+        db = Database.create(f"sqlite:///{db_path}", upgrade_table=get_upgrade_table())
+        await db.start()
+        try:
+            async with db.acquire() as conn:
+                rows = await conn.fetch(
+                    """SELECT domain, online, status_since, failure_counter
+                       FROM streams
+                       ORDER BY domain"""
+                )
+        finally:
+            await db.stop()
+
+        streams = {row["domain"]: row for row in rows}
+        assert streams["live.example"]["online"] == 1
+        assert streams["live.example"]["status_since"] == "2026-05-21T19:06:24+00:00"
+        assert streams["live.example"]["failure_counter"] == 2
+        assert streams["offline.example"]["online"] == 0
+        assert streams["offline.example"]["status_since"] == "2026-05-18T01:23:27+00:00"
+        assert streams["offline.example"]["failure_counter"] == 3
+        assert streams["blank-connect.example"]["online"] == 0
+        assert (
+            streams["blank-connect.example"]["status_since"]
+            == "2026-05-20T10:34:56+00:00"
+        )
+        assert streams["invalid-timestamp.example"]["online"] == 0
+        assert streams["invalid-timestamp.example"]["status_since"] is None
+
+    async def test_preserves_legacy_orphaned_subscription(self, tmp_path: Path) -> None:
+        """Create placeholder streams before enforcing subscription foreign keys."""
+        db_path = tmp_path / "legacy.db"
+        with closing(sqlite3.connect(db_path)) as conn, conn:
+            conn.executescript(
+                """
+                CREATE TABLE version (version INTEGER PRIMARY KEY);
+                INSERT INTO version (version) VALUES (4);
+
+                CREATE TABLE streams (
+                    domain TEXT NOT NULL UNIQUE,
+                    name TEXT,
+                    title TEXT,
+                    online BOOLEAN NOT NULL DEFAULT false,
+                    status_since TEXT,
+                    failure_counter INTEGER DEFAULT 0,
+                    PRIMARY KEY(domain)
+                );
+
+                CREATE TABLE subscriptions (
+                    stream_domain TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    UNIQUE(room_id, stream_domain)
+                );
+
+                INSERT INTO subscriptions (stream_domain, room_id)
+                VALUES ('missing.example', '!room:example.com');
+                """
+            )
+
+        db = Database.create(f"sqlite:///{db_path}", upgrade_table=get_upgrade_table())
+        await db.start()
+        try:
+            async with db.acquire() as conn:
+                stream = await conn.fetchrow(
+                    "SELECT * FROM streams WHERE domain=$1",
+                    "missing.example",
+                )
+                subscription = await conn.fetchrow(
+                    """SELECT * FROM subscriptions
+                       WHERE stream_domain=$1 AND room_id=$2""",
+                    "missing.example",
+                    "!room:example.com",
+                )
+        finally:
+            await db.stop()
+
+        assert stream is not None
+        assert stream["online"] == 0
+        assert stream["failure_counter"] == 0
+        assert subscription is not None
+
+    async def test_removes_legacy_stream_without_subscriptions(
+        self, tmp_path: Path
+    ) -> None:
+        """Drop stream rows that are no longer referenced by subscriptions."""
+        db_path = tmp_path / "legacy.db"
+        with closing(sqlite3.connect(db_path)) as conn, conn:
+            conn.executescript(
+                """
+                CREATE TABLE version (version INTEGER PRIMARY KEY);
+                INSERT INTO version (version) VALUES (4);
+
+                CREATE TABLE streams (
+                    domain TEXT NOT NULL UNIQUE,
+                    name TEXT,
+                    title TEXT,
+                    online BOOLEAN NOT NULL DEFAULT false,
+                    status_since TEXT,
+                    failure_counter INTEGER DEFAULT 0,
+                    PRIMARY KEY(domain)
+                );
+
+                CREATE TABLE subscriptions (
+                    stream_domain TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    UNIQUE(room_id, stream_domain)
+                );
+
+                INSERT INTO streams (domain)
+                VALUES ('subscribed.example'), ('orphaned.example');
+                INSERT INTO subscriptions (stream_domain, room_id)
+                VALUES ('subscribed.example', '!room:example.com');
+                """
+            )
+
+        db = Database.create(f"sqlite:///{db_path}", upgrade_table=get_upgrade_table())
+        await db.start()
+        try:
+            async with db.acquire() as conn:
+                subscribed_stream = await conn.fetchrow(
+                    "SELECT * FROM streams WHERE domain=$1",
+                    "subscribed.example",
+                )
+                orphaned_stream = await conn.fetchrow(
+                    "SELECT * FROM streams WHERE domain=$1",
+                    "orphaned.example",
+                )
+        finally:
+            await db.stop()
+
+        assert subscribed_stream is not None
+        assert orphaned_stream is None
+
+    async def test_preserves_and_coerces_legacy_stream_state(
+        self, tmp_path: Path
+    ) -> None:
+        """Keep subscribed stream state while coercing legacy constrained values."""
+        db_path = tmp_path / "legacy.db"
+        with closing(sqlite3.connect(db_path)) as conn, conn:
+            conn.executescript(
+                """
+                CREATE TABLE version (version INTEGER PRIMARY KEY);
+                INSERT INTO version (version) VALUES (4);
+
+                CREATE TABLE streams (
+                    domain TEXT NOT NULL UNIQUE,
+                    name TEXT,
+                    title TEXT,
+                    online BOOLEAN NOT NULL DEFAULT false,
+                    status_since TEXT,
+                    failure_counter INTEGER DEFAULT 0,
+                    PRIMARY KEY(domain)
+                );
+
+                CREATE TABLE subscriptions (
+                    stream_domain TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    UNIQUE(room_id, stream_domain)
+                );
+
+                INSERT INTO streams (
+                    domain, name, title, online, status_since, failure_counter
+                )
+                VALUES
+                    (
+                        'preserved.example',
+                        'Preserved Name',
+                        'Preserved Title',
+                        1,
+                        '2026-01-01T12:00:00+00:00',
+                        7
+                    ),
+                    ('truthy-online.example', NULL, NULL, 2, NULL, 0),
+                    ('falsy-online.example', NULL, NULL, 0, NULL, 0),
+                    ('negative-counter.example', NULL, NULL, 0, NULL, -3),
+                    ('null-counter.example', NULL, NULL, 0, NULL, NULL);
+
+                INSERT INTO subscriptions (stream_domain, room_id)
+                VALUES
+                    ('preserved.example', '!preserved:example.com'),
+                    ('truthy-online.example', '!truthy:example.com'),
+                    ('falsy-online.example', '!falsy:example.com'),
+                    ('negative-counter.example', '!negative:example.com'),
+                    ('null-counter.example', '!null:example.com');
+                """
+            )
+
+        db = Database.create(f"sqlite:///{db_path}", upgrade_table=get_upgrade_table())
+        await db.start()
+        try:
+            async with db.acquire() as conn:
+                rows = await conn.fetch(
+                    """SELECT domain, name, title, online, status_since, failure_counter
+                       FROM streams
+                       ORDER BY domain"""
+                )
+        finally:
+            await db.stop()
+
+        streams = {row["domain"]: row for row in rows}
+        preserved = streams["preserved.example"]
+        assert preserved["name"] == "Preserved Name"
+        assert preserved["title"] == "Preserved Title"
+        assert preserved["online"] == 1
+        assert preserved["status_since"] == "2026-01-01T12:00:00+00:00"
+        assert preserved["failure_counter"] == 7
+        assert streams["truthy-online.example"]["online"] == 1
+        assert streams["falsy-online.example"]["online"] == 0
+        assert streams["negative-counter.example"]["failure_counter"] == 0
+        assert streams["null-counter.example"]["failure_counter"] == 0
+
+    async def test_removes_invalid_legacy_subscriptions(self, tmp_path: Path) -> None:
+        """Drop legacy subscriptions with unusable domains or room IDs."""
+        db_path = tmp_path / "legacy.db"
+        with closing(sqlite3.connect(db_path)) as conn, conn:
+            conn.executescript(
+                """
+                CREATE TABLE version (version INTEGER PRIMARY KEY);
+                INSERT INTO version (version) VALUES (4);
+
+                CREATE TABLE streams (
+                    domain TEXT NOT NULL UNIQUE,
+                    name TEXT,
+                    title TEXT,
+                    online BOOLEAN NOT NULL DEFAULT false,
+                    status_since TEXT,
+                    failure_counter INTEGER DEFAULT 0,
+                    PRIMARY KEY(domain)
+                );
+
+                CREATE TABLE subscriptions (
+                    stream_domain TEXT,
+                    room_id TEXT,
+                    UNIQUE(room_id, stream_domain)
+                );
+
+                INSERT INTO streams (domain)
+                VALUES ('valid.example'), ('invalid-room.example');
+                INSERT INTO subscriptions (stream_domain, room_id)
+                VALUES
+                    ('valid.example', '!room:example.com'),
+                    ('invalid-room.example', ''),
+                    ('', '!blank-domain:example.com'),
+                    (NULL, '!null-domain:example.com'),
+                    ('null-room.example', NULL);
+                """
+            )
+
+        db = Database.create(f"sqlite:///{db_path}", upgrade_table=get_upgrade_table())
+        await db.start()
+        try:
+            async with db.acquire() as conn:
+                streams = await conn.fetch("SELECT domain FROM streams")
+                subscriptions = await conn.fetch(
+                    "SELECT stream_domain, room_id FROM subscriptions"
+                )
+        finally:
+            await db.stop()
+
+        assert [row["domain"] for row in streams] == ["valid.example"]
+        assert [(row["stream_domain"], row["room_id"]) for row in subscriptions] == [
+            ("valid.example", "!room:example.com")
         ]
 
 
@@ -72,33 +646,27 @@ class TestNormalizeLegacyStatusSince:
                 "2026-05-18T01:23:27+00:00",
                 id="negative-offset",
             ),
+            pytest.param(
+                datetime(2026, 5, 21, 19, 6, 24, tzinfo=UTC),
+                "2026-05-21T19:06:24+00:00",
+                id="aware-datetime",
+            ),
+            pytest.param(
+                datetime(2026, 5, 21, 19, 6, 24, tzinfo=UTC).replace(tzinfo=None),
+                None,
+                id="naive-datetime",
+            ),
             pytest.param("", None, id="blank"),
             pytest.param(None, None, id="null"),
             pytest.param("not a timestamp", None, id="malformed"),
+            pytest.param(123, None, id="unsupported-type"),
         ],
     )
     def test_normalizes_parseable_aware_timestamps(
-        self, value: str | None, expected: str | None
+        self, value: object, expected: str | None
     ) -> None:
         """Normalize parseable legacy values and ignore unusable ones."""
         assert _normalize_legacy_status_since(value) == expected
-
-
-class TestStreamExists:
-    """Stream existence checks."""
-
-    async def test_returns_true_for_existing_stream(
-        self, stream_repo: StreamRepository
-    ) -> None:
-        """Return True when the stream exists in the database."""
-        await stream_repo.create("example.com")
-        assert await stream_repo.exists("example.com") is True
-
-    async def test_returns_false_for_missing_stream(
-        self, stream_repo: StreamRepository
-    ) -> None:
-        """Return False when the stream does not exist in the database."""
-        assert await stream_repo.exists("missing.com") is False
 
 
 class TestStreamCreate:
@@ -192,42 +760,34 @@ class TestStreamUpdate:
         assert state.status_since == "2026-01-01T12:00:00+00:00"
 
 
-class TestGetSubscribedStreamsForRoom:
-    """Subscribed stream lookup by room."""
+class TestStreamFailureCounter:
+    """Stream failure counter updates."""
 
-    async def test_returns_all_domains_for_room(
-        self,
-        stream_repo: StreamRepository,
-        subscription_repo: SubscriptionRepository,
+    async def test_reset_failure_counter_sets_counter_to_zero(
+        self, stream_repo: StreamRepository
     ) -> None:
-        """Return all domains a room is subscribed to."""
-        await stream_repo.create("alpha.com")
-        await stream_repo.create("beta.com")
-        await subscription_repo.add("alpha.com", "!room1:example.com")
-        await subscription_repo.add("beta.com", "!room1:example.com")
+        """Reset a nonzero failure counter back to zero."""
+        await stream_repo.create("example.com")
+        await stream_repo.increment_failure_counter("example.com")
+        await stream_repo.increment_failure_counter("example.com")
 
-        result = await subscription_repo.get_subscribed_streams_for_room(
-            "!room1:example.com"
-        )
-        assert sorted(result) == ["alpha.com", "beta.com"]
+        await stream_repo.reset_failure_counter("example.com")
 
-    async def test_returns_empty_list_for_unsubscribed_room(
-        self, subscription_repo: SubscriptionRepository
-    ) -> None:
-        """Return an empty list when the room has no subscriptions."""
-        result = await subscription_repo.get_subscribed_streams_for_room(
-            "!nobody:example.com"
-        )
-        assert result == []
+        state = await stream_repo.get_by_domain("example.com")
+        assert state is not None
+        assert state.failure_counter == 0
 
 
 class TestHasRoomSubscriptions:
     """Room subscription existence checks."""
 
     async def test_returns_true_for_subscribed_room(
-        self, subscription_repo: SubscriptionRepository
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
     ) -> None:
         """Return True when the room has at least one subscription."""
+        await stream_repo.create("alpha.com")
         await subscription_repo.add("alpha.com", "!room1:example.com")
 
         assert await subscription_repo.has_room_subscriptions("!room1:example.com")
@@ -242,18 +802,17 @@ class TestHasRoomSubscriptions:
 class TestGetRoomSubscriptions:
     """Resolved room subscription lookup."""
 
-    async def test_returns_sorted_stream_states_and_skips_missing_rows(
+    async def test_returns_sorted_stream_states(
         self,
         stream_repo: StreamRepository,
         subscription_repo: SubscriptionRepository,
     ) -> None:
-        """Return sorted resolved subscriptions and skip missing stream rows."""
+        """Return sorted resolved subscriptions."""
         await stream_repo.create("beta.example")
         await stream_repo.update("beta.example", name="Beta")
         await stream_repo.create("alpha.example")
         await stream_repo.update("alpha.example", name="Alpha")
         await subscription_repo.add("beta.example", "!room:example.com")
-        await subscription_repo.add("missing.example", "!room:example.com")
         await subscription_repo.add("alpha.example", "!room:example.com")
 
         subscriptions = await subscription_repo.get_room_subscriptions(
@@ -343,7 +902,8 @@ class TestAddSubscription:
     """Subscription creation behavior."""
 
     async def test_adds_subscription(
-        self, subscription_repo: SubscriptionRepository
+        self,
+        subscription_repo: SubscriptionRepository,
     ) -> None:
         """Add a subscription row."""
         await subscription_repo.add("alpha.com", "!room1:example.com")
@@ -351,8 +911,19 @@ class TestAddSubscription:
             "!room1:example.com"
         ]
 
+    async def test_creates_stream_parent(
+        self,
+        stream_repo: StreamRepository,
+        subscription_repo: SubscriptionRepository,
+    ) -> None:
+        """Create the stream row when adding a subscription."""
+        await subscription_repo.add("alpha.com", "!room1:example.com")
+
+        assert await stream_repo.get_by_domain("alpha.com") is not None
+
     async def test_raises_when_existing(
-        self, subscription_repo: SubscriptionRepository
+        self,
+        subscription_repo: SubscriptionRepository,
     ) -> None:
         """Raise AlreadySubscribedError when a subscription already exists."""
         await subscription_repo.add("alpha.com", "!room1:example.com")
@@ -364,7 +935,8 @@ class TestRemoveSubscription:
     """Subscription removal behavior."""
 
     async def test_removes_subscription(
-        self, subscription_repo: SubscriptionRepository
+        self,
+        subscription_repo: SubscriptionRepository,
     ) -> None:
         """Remove an existing subscription row."""
         await subscription_repo.add("alpha.com", "!room1:example.com")
@@ -403,26 +975,25 @@ class TestGetAllSubscribedDomains:
         assert result == []
 
 
-class TestCountByDomain:
-    """Subscription count by domain."""
+class TestHasDomainSubscriptions:
+    """Domain subscription existence checks."""
 
-    async def test_returns_correct_count(
+    async def test_returns_true_for_subscribed_domain(
         self,
         stream_repo: StreamRepository,
         subscription_repo: SubscriptionRepository,
     ) -> None:
-        """Return the correct subscription count for a domain."""
+        """Return True when the domain has at least one subscription."""
         await stream_repo.create("alpha.com")
         await subscription_repo.add("alpha.com", "!room1:example.com")
-        await subscription_repo.add("alpha.com", "!room2:example.com")
 
-        assert await subscription_repo.count_by_domain("alpha.com") == 2
+        assert await subscription_repo.has_domain_subscriptions("alpha.com")
 
-    async def test_returns_zero_for_unknown_domain(
+    async def test_returns_false_for_unknown_domain(
         self, subscription_repo: SubscriptionRepository
     ) -> None:
-        """Return 0 for a domain with no subscriptions."""
-        assert await subscription_repo.count_by_domain("unknown.com") == 0
+        """Return False when the domain has no subscriptions."""
+        assert not await subscription_repo.has_domain_subscriptions("unknown.com")
 
 
 class TestCountByDomains:
@@ -455,29 +1026,3 @@ class TestCountByDomains:
     ) -> None:
         """Return an empty mapping when no domains are requested."""
         assert await subscription_repo.count_by_domains([]) == {}
-
-
-class TestDeleteAllForDomain:
-    """Bulk subscription deletion by domain."""
-
-    async def test_deletes_all_subscriptions_and_returns_count(
-        self,
-        stream_repo: StreamRepository,
-        subscription_repo: SubscriptionRepository,
-    ) -> None:
-        """Delete all subscriptions for the domain and return the count."""
-        await stream_repo.create("alpha.com")
-        await subscription_repo.add("alpha.com", "!room1:example.com")
-        await subscription_repo.add("alpha.com", "!room2:example.com")
-
-        deleted = await subscription_repo.delete_all_for_domain("alpha.com")
-        assert deleted == 2
-
-        rooms = await subscription_repo.get_subscribed_rooms("alpha.com")
-        assert rooms == []
-
-    async def test_returns_zero_for_unknown_domain(
-        self, subscription_repo: SubscriptionRepository
-    ) -> None:
-        """Return 0 when deleting subscriptions for an unknown domain."""
-        assert await subscription_repo.delete_all_for_domain("unknown.com") == 0

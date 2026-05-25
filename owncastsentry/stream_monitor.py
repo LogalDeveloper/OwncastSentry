@@ -427,17 +427,13 @@ class StreamMonitor:
             # Send deletion notification
             await self.notification_service.send_cleanup_deletion(domain)
 
-            # Delete all subscriptions for this domain
-            deleted_count = await self.subscription_repo.delete_all_for_domain(domain)
-
             # Delete the stream record
             await self.stream_repo.delete(domain)
             self.offline_timer_cache.pop(domain, None)
             self.notification_service.clear_notification_state(domain)
 
             self.log.info(
-                "[%s] Cleanup complete. Deleted %s subscriptions and stream record.",
+                "[%s] Cleanup complete. Deleted stream record and subscriptions.",
                 domain,
-                deleted_count,
             )
             self.metrics.remove_stream(domain)

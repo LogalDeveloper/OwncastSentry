@@ -40,6 +40,62 @@ if TYPE_CHECKING:
     from owncastsentry import OwncastSentry
 
 
+_VALID_STATUS_BODY = json.dumps(VALID_STATUS_RESPONSE).encode()
+
+
+async def _subscribe_valid_stream(
+    maubot_test_bot: TestBot,
+    domain: str = "stream.logal.dev",
+    *,
+    room_id: str | None = None,
+) -> None:
+    """Subscribe to a domain with a mocked valid Owncast status response."""
+    with aioresponses() as mocked:
+        mocked.get(
+            f"https://{domain}{_OWNCAST_STATUS_PATH}",
+            body=_VALID_STATUS_BODY,
+        )
+        if room_id is None:
+            await maubot_test_bot.send(f"!subscribe {domain}")
+        else:
+            await maubot_test_bot.send(f"!subscribe {domain}", room_id=room_id)
+
+
+async def _subscribe_valid_streams(
+    maubot_test_bot: TestBot,
+    *domains: str,
+) -> None:
+    """Subscribe to multiple domains with mocked valid Owncast status responses."""
+    with aioresponses() as mocked:
+        for domain in domains:
+            mocked.get(
+                f"https://{domain}{_OWNCAST_STATUS_PATH}",
+                body=_VALID_STATUS_BODY,
+            )
+
+        for domain in domains:
+            await maubot_test_bot.send(f"!subscribe {domain}")
+
+
+async def _set_stream_state(
+    maubot_plugin: OwncastSentry,
+    domain: str = "stream.logal.dev",
+    *,
+    name: str | None = None,
+    title: str | None = None,
+    online: bool = False,
+    status_since: str | None = None,
+) -> None:
+    """Write stream state used by command rendering tests."""
+    await maubot_plugin.stream_repo.update(
+        domain,
+        name=name,
+        title=title,
+        online=online,
+        status_since=status_since,
+    )
+
+
 class TestEscapeMarkdown:
     """Markdown special character escaping."""
 
@@ -121,13 +177,7 @@ class TestSubscribeCommand:
 
     async def test_subscribe_valid_stream(self, maubot_test_bot: TestBot) -> None:
         """Subscribe to a valid Owncast stream."""
-        status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
-        with aioresponses() as mocked:
-            mocked.get(
-                status_url,
-                body=json.dumps(VALID_STATUS_RESPONSE).encode(),
-            )
-            await maubot_test_bot.send("!subscribe stream.logal.dev")
+        await _subscribe_valid_stream(maubot_test_bot)
 
         assert len(maubot_test_bot.responded) == 1
         assert maubot_test_bot.responded[0].content.body == (
@@ -152,13 +202,7 @@ class TestSubscribeCommand:
 
     async def test_subscribe_already_subscribed(self, maubot_test_bot: TestBot) -> None:
         """Reject duplicate subscription in the same room."""
-        status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
-        with aioresponses() as mocked:
-            mocked.get(
-                status_url,
-                body=json.dumps(VALID_STATUS_RESPONSE).encode(),
-            )
-            await maubot_test_bot.send("!subscribe stream.logal.dev")
+        await _subscribe_valid_stream(maubot_test_bot)
 
         # Second subscribe; stream already exists so validation is skipped
         await maubot_test_bot.send("!subscribe stream.logal.dev")
@@ -172,13 +216,7 @@ class TestSubscribeCommand:
         self, maubot_test_bot: TestBot
     ) -> None:
         """Skip validation when the domain already has subscriptions."""
-        status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
-        with aioresponses() as mocked:
-            mocked.get(
-                status_url,
-                body=json.dumps(VALID_STATUS_RESPONSE).encode(),
-            )
-            await maubot_test_bot.send("!subscribe stream.logal.dev")
+        await _subscribe_valid_stream(maubot_test_bot)
 
         # Subscribe from a different room. The existing subscribed domain skips
         # validation, so an empty aioresponses context will raise ConnectionError
@@ -201,13 +239,7 @@ class TestUnsubscribeCommand:
 
     async def test_unsubscribe_existing(self, maubot_test_bot: TestBot) -> None:
         """Unsubscribe from a subscribed stream."""
-        status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
-        with aioresponses() as mocked:
-            mocked.get(
-                status_url,
-                body=json.dumps(VALID_STATUS_RESPONSE).encode(),
-            )
-            await maubot_test_bot.send("!subscribe stream.logal.dev")
+        await _subscribe_valid_stream(maubot_test_bot)
 
         await maubot_test_bot.send("!unsubscribe stream.logal.dev")
 
@@ -247,18 +279,9 @@ class TestSubscriptionsCommand:
         self, maubot_test_bot: TestBot, maubot_plugin: OwncastSentry
     ) -> None:
         """Show stream details including title and duration."""
-        # Subscribe first
-        status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
-        with aioresponses() as mocked:
-            mocked.get(
-                status_url,
-                body=json.dumps(VALID_STATUS_RESPONSE).encode(),
-            )
-            await maubot_test_bot.send("!subscribe stream.logal.dev")
-
-        # Update stream state to be online with a name
-        await maubot_plugin.stream_repo.update(
-            "stream.logal.dev",
+        await _subscribe_valid_stream(maubot_test_bot)
+        await _set_stream_state(
+            maubot_plugin,
             name="Test Stream",
             title="Playing Games",
             online=True,
@@ -283,16 +306,9 @@ class TestSubscriptionsCommand:
         self, maubot_test_bot: TestBot, maubot_plugin: OwncastSentry
     ) -> None:
         """Render stream name and title as literal text in command output."""
-        status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
-        with aioresponses() as mocked:
-            mocked.get(
-                status_url,
-                body=json.dumps(VALID_STATUS_RESPONSE).encode(),
-            )
-            await maubot_test_bot.send("!subscribe stream.logal.dev")
-
-        await maubot_plugin.stream_repo.update(
-            "stream.logal.dev",
+        await _subscribe_valid_stream(maubot_test_bot)
+        await _set_stream_state(
+            maubot_plugin,
             name="*Bold* [link](https://evil.example)\nName",
             title="`code` > quote #tag",
             online=True,
@@ -317,18 +333,9 @@ class TestSubscriptionsCommand:
         self, maubot_test_bot: TestBot, maubot_plugin: OwncastSentry
     ) -> None:
         """Show offline status for non-live streams."""
-        # Subscribe first
-        status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
-        with aioresponses() as mocked:
-            mocked.get(
-                status_url,
-                body=json.dumps(VALID_STATUS_RESPONSE).encode(),
-            )
-            await maubot_test_bot.send("!subscribe stream.logal.dev")
-
-        # Update stream state to be offline
-        await maubot_plugin.stream_repo.update(
-            "stream.logal.dev",
+        await _subscribe_valid_stream(maubot_test_bot)
+        await _set_stream_state(
+            maubot_plugin,
             name="Test Stream",
             status_since="2026-01-01T10:00:00+00:00",
         )
@@ -349,13 +356,7 @@ class TestSubscriptionsCommand:
         self, maubot_test_bot: TestBot
     ) -> None:
         """Show offline status without duration before first poll completes."""
-        status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
-        with aioresponses() as mocked:
-            mocked.get(
-                status_url,
-                body=json.dumps(VALID_STATUS_RESPONSE).encode(),
-            )
-            await maubot_test_bot.send("!subscribe stream.logal.dev")
+        await _subscribe_valid_stream(maubot_test_bot)
 
         # Stream row exists with no state yet - query subscriptions immediately
         await maubot_test_bot.send("!subscriptions")
@@ -374,13 +375,7 @@ class TestSubscriptionsCommand:
         self, maubot_test_bot: TestBot, maubot_plugin: OwncastSentry
     ) -> None:
         """Show unknown status when instance has been unreachable."""
-        status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
-        with aioresponses() as mocked:
-            mocked.get(
-                status_url,
-                body=json.dumps(VALID_STATUS_RESPONSE).encode(),
-            )
-            await maubot_test_bot.send("!subscribe stream.logal.dev")
+        await _subscribe_valid_stream(maubot_test_bot)
 
         # Increment failure counter past the unknown threshold
         for _ in range(UNKNOWN_STATUS_THRESHOLD + 1):
@@ -406,27 +401,18 @@ class TestSubscriptionsCommand:
     ) -> None:
         """List subscriptions ordered by domain with mixed statuses."""
         # Subscribe in reverse domain order to verify domain-sorted output
-        with aioresponses() as mocked:
-            mocked.get(
-                f"https://beta.com{_OWNCAST_STATUS_PATH}",
-                body=json.dumps(VALID_STATUS_RESPONSE).encode(),
-            )
-            mocked.get(
-                f"https://alpha.com{_OWNCAST_STATUS_PATH}",
-                body=json.dumps(VALID_STATUS_RESPONSE).encode(),
-            )
-            await maubot_test_bot.send("!subscribe beta.com")
-            await maubot_test_bot.send("!subscribe alpha.com")
+        await _subscribe_valid_streams(maubot_test_bot, "beta.com", "alpha.com")
 
-        # Set alpha online, beta offline
-        await maubot_plugin.stream_repo.update(
+        await _set_stream_state(
+            maubot_plugin,
             "alpha.com",
             name="Alpha Stream",
             title="Streaming Live",
             online=True,
             status_since="2026-03-13T10:00:00+00:00",
         )
-        await maubot_plugin.stream_repo.update(
+        await _set_stream_state(
+            maubot_plugin,
             "beta.com",
             name="Beta Stream",
             status_since="2026-03-12T18:00:00+00:00",
@@ -470,18 +456,9 @@ class TestLiveCommand:
         self, maubot_test_bot: TestBot, maubot_plugin: OwncastSentry
     ) -> None:
         """Show 'no live' message when all streams are offline."""
-        # Subscribe first
-        status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
-        with aioresponses() as mocked:
-            mocked.get(
-                status_url,
-                body=json.dumps(VALID_STATUS_RESPONSE).encode(),
-            )
-            await maubot_test_bot.send("!subscribe stream.logal.dev")
-
-        # Update stream state to offline
-        await maubot_plugin.stream_repo.update(
-            "stream.logal.dev",
+        await _subscribe_valid_stream(maubot_test_bot)
+        await _set_stream_state(
+            maubot_plugin,
             name="Test Stream",
             status_since="2026-01-01T10:00:00+00:00",
         )
@@ -500,18 +477,9 @@ class TestLiveCommand:
         self, maubot_test_bot: TestBot, maubot_plugin: OwncastSentry
     ) -> None:
         """Show live stream with title and duration."""
-        # Subscribe first
-        status_url = f"https://stream.logal.dev{_OWNCAST_STATUS_PATH}"
-        with aioresponses() as mocked:
-            mocked.get(
-                status_url,
-                body=json.dumps(VALID_STATUS_RESPONSE).encode(),
-            )
-            await maubot_test_bot.send("!subscribe stream.logal.dev")
-
-        # Update stream state to online
-        await maubot_plugin.stream_repo.update(
-            "stream.logal.dev",
+        await _subscribe_valid_stream(maubot_test_bot)
+        await _set_stream_state(
+            maubot_plugin,
             name="Test Stream",
             title="Playing Games",
             online=True,
@@ -535,27 +503,18 @@ class TestLiveCommand:
     ) -> None:
         """List live streams ordered by domain with different durations."""
         # Subscribe in reverse domain order to verify domain-sorted output
-        with aioresponses() as mocked:
-            mocked.get(
-                f"https://beta.com{_OWNCAST_STATUS_PATH}",
-                body=json.dumps(VALID_STATUS_RESPONSE).encode(),
-            )
-            mocked.get(
-                f"https://alpha.com{_OWNCAST_STATUS_PATH}",
-                body=json.dumps(VALID_STATUS_RESPONSE).encode(),
-            )
-            await maubot_test_bot.send("!subscribe beta.com")
-            await maubot_test_bot.send("!subscribe alpha.com")
+        await _subscribe_valid_streams(maubot_test_bot, "beta.com", "alpha.com")
 
-        # Set both streams online with different status timestamps
-        await maubot_plugin.stream_repo.update(
+        await _set_stream_state(
+            maubot_plugin,
             "alpha.com",
             name="Alpha Stream",
             title="Morning Show",
             online=True,
             status_since="2026-03-13T10:00:00+00:00",
         )
-        await maubot_plugin.stream_repo.update(
+        await _set_stream_state(
+            maubot_plugin,
             "beta.com",
             name="Beta Stream",
             title="Evening Vibes",
