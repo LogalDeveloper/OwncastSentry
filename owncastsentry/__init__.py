@@ -127,7 +127,10 @@ class OwncastSentry(Plugin):
         except Exception:
             self.metrics_service.record_error(ErrorSource.COMMAND)
             self.log.exception("Unhandled exception in subscribe command.")
-            await evt.reply("An unexpected error occurred. Please try again later.")
+            await evt.reply(
+                "An unexpected error occurred. Please try again later.",
+                markdown=False,
+            )
 
     @command.new(help="Unsubscribes from an Owncast stream.")
     @command.argument("url")
@@ -138,7 +141,10 @@ class OwncastSentry(Plugin):
         except Exception:
             self.metrics_service.record_error(ErrorSource.COMMAND)
             self.log.exception("Unhandled exception in unsubscribe command.")
-            await evt.reply("An unexpected error occurred. Please try again later.")
+            await evt.reply(
+                "An unexpected error occurred. Please try again later.",
+                markdown=False,
+            )
 
     @command.new(help="Lists all stream subscriptions in this room.")
     async def subscriptions(self, evt: MessageEvent) -> None:
@@ -148,7 +154,10 @@ class OwncastSentry(Plugin):
         except Exception:
             self.metrics_service.record_error(ErrorSource.COMMAND)
             self.log.exception("Unhandled exception in subscriptions command.")
-            await evt.reply("An unexpected error occurred. Please try again later.")
+            await evt.reply(
+                "An unexpected error occurred. Please try again later.",
+                markdown=False,
+            )
 
     @command.new(help="Lists currently live streams in this room.")
     async def live(self, evt: MessageEvent) -> None:
@@ -158,7 +167,10 @@ class OwncastSentry(Plugin):
         except Exception:
             self.metrics_service.record_error(ErrorSource.COMMAND)
             self.log.exception("Unhandled exception in live command.")
-            await evt.reply("An unexpected error occurred. Please try again later.")
+            await evt.reply(
+                "An unexpected error occurred. Please try again later.",
+                markdown=False,
+            )
 
     async def _run_stream_updates_every_minute(self) -> None:
         """Run stream state updates at the top of each wall-clock minute."""

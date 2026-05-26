@@ -20,6 +20,7 @@ import time
 from typing import TYPE_CHECKING
 
 import pytest
+from mautrix.types import MessageType
 
 from owncastsentry.metrics import MetricsService
 from owncastsentry.notification_service import (
@@ -301,6 +302,7 @@ class TestNotifyStreamLive:
             "#tag"
         )
         for msg in client.sent_messages:
+            assert msg.content.msgtype == MessageType.NOTICE
             assert msg.content.body == expected_body
 
     async def test_records_cooldown_after_success(
@@ -358,10 +360,10 @@ class TestNotifyStreamLive:
         """Count a cancelled delivery result as a failure."""
         client = _StubMatrixClient()
 
-        async def send_message(_room_id: str, _content: object) -> None:
+        async def send_notice(_room_id: str, _text: str) -> None:
             raise asyncio.CancelledError
 
-        client.send_message = send_message
+        client.send_notice = send_notice
         service = _make_service(client=client, subscription_repo=subscription_repo)
 
         await stream_repo.create("example.com")
@@ -406,6 +408,7 @@ class TestNotifyStreamLive:
 
         assert len(client.sent_messages) == 1
         assert client.sent_messages[0].room_id == "!good:matrix.org"
+        assert client.sent_messages[0].content.msgtype == MessageType.NOTICE
         assert client.sent_messages[0].content.body == (
             "🎥 Stream is now live!\n"
             "Stream Title: Title\n"
@@ -432,6 +435,7 @@ class TestSendCleanupWarning:
         await service.send_cleanup_warning("example.com")
 
         assert len(client.sent_messages) == 1
+        assert client.sent_messages[0].content.msgtype == MessageType.NOTICE
         assert client.sent_messages[0].content.body == (
             "⚠️  Warning: Subscription Cleanup Scheduled\n"
             "\n"
@@ -461,6 +465,7 @@ class TestSendCleanupDeletion:
         await service.send_cleanup_deletion("example.com")
 
         assert len(client.sent_messages) == 1
+        assert client.sent_messages[0].content.msgtype == MessageType.NOTICE
         assert client.sent_messages[0].content.body == (
             "🗑️  Subscription Automatically Removed\n"
             "\n"

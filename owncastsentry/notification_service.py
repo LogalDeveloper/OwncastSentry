@@ -18,8 +18,6 @@ import asyncio
 import time
 from typing import TYPE_CHECKING, Any
 
-from mautrix.types import MessageType, TextMessageEventContent
-
 from .metrics import NotificationType
 
 if TYPE_CHECKING:
@@ -209,8 +207,7 @@ class NotificationService:
         Propagates send errors so broadcast delivery accounting can count failures.
         """
         try:
-            content = TextMessageEventContent(msgtype=MessageType.TEXT, body=body_text)
-            await self.client.send_message(room_id, content)
+            await self.client.send_notice(room_id, body_text)
         except Exception as exception:
             self.log.warning(
                 "[%s] Failed to send notification message to room [%s]: %s",

@@ -111,18 +111,21 @@ class CommandHandler:
                 "The URL you supplied does not appear to "
                 "be a valid Owncast instance. You may have "
                 "specified an invalid domain, or the "
-                "instance is offline."
+                "instance is offline.",
+                markdown=False,
             )
             return
         except AlreadySubscribedError as e:
             await evt.reply(
-                f"This room is already subscribed to notifications for {e.domain}."
+                f"This room is already subscribed to notifications for {e.domain}.",
+                markdown=False,
             )
             return
 
         await evt.reply(
             f"Subscription added! This room will receive "
-            f"notifications when {stream_domain} goes live."
+            f"notifications when {stream_domain} goes live.",
+            markdown=False,
         )
 
     async def unsubscribe(self, evt: MessageEvent, url: str) -> None:
@@ -137,13 +140,15 @@ class CommandHandler:
             )
         except NotSubscribedError as e:
             await evt.reply(
-                f"This room is already not subscribed to notifications for {e.domain}."
+                f"This room is already not subscribed to notifications for {e.domain}.",
+                markdown=False,
             )
             return
 
         await evt.reply(
             f"Subscription removed! This room will no "
-            f"longer receive notifications for {stream_domain}."
+            f"longer receive notifications for {stream_domain}.",
+            markdown=False,
         )
 
     async def subscriptions(self, evt: MessageEvent) -> None:

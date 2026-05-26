@@ -15,9 +15,12 @@
 """Shared test fixtures and stubs for OwncastSentry tests."""
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, override
 
 import pytest
+from maubot.matrix import MaubotMatrixClient
+from maubot.testing.bot import MatrixEvent
+from mautrix.types import EventContent, EventID, EventType, RoomID
 from mautrix.util.async_db import Database
 from prometheus_client import generate_latest
 
@@ -185,27 +188,35 @@ VALID_STATUS_RESPONSE: dict[str, object] = {
 }
 
 
-@dataclass
-class _SentMessage:
-    """A message recorded by _StubMatrixClient."""
-
-    room_id: str
-    content: Any
-
-
-class _StubMatrixClient:
-    """Recording stub for the Matrix client used in notification tests."""
+class _StubMatrixClient(MaubotMatrixClient):
+    """Recording Matrix client using Mautrix message builders."""
 
     def __init__(self) -> None:
-        self.sent_messages: list[_SentMessage] = []
+        self.sent_messages: list[MatrixEvent] = []
         self.should_fail_for_rooms: set[str] = set()
 
-    async def send_message(self, room_id: str, content: Any) -> None:
-        """Record a sent message, or raise if room is in the fail set."""
+    @override
+    async def send_message_event(
+        self,
+        room_id: RoomID,
+        event_type: EventType,
+        content: EventContent,
+        _disable_encryption: bool = False,
+        **kwargs: Any,
+    ) -> EventID:
+        """Record a sent message event, or raise if room is in the fail set."""
         if room_id in self.should_fail_for_rooms:
             msg = f"Stubbed failure for room {room_id}"
             raise RuntimeError(msg)
-        self.sent_messages.append(_SentMessage(room_id=room_id, content=content))
+        self.sent_messages.append(
+            MatrixEvent(
+                room_id=room_id,
+                event_type=event_type,
+                content=content,
+                kwargs=kwargs,
+            )
+        )
+        return EventID("$stubbed")
 
 
 @dataclass
