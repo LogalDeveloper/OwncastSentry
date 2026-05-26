@@ -477,3 +477,9 @@ class TestOpenConnectionCount:
     async def test_zero_with_no_requests(self, owncast_client: OwncastClient) -> None:
         """Return zero when no requests have been made."""
         assert owncast_client.open_connection_count == 0
+
+    async def test_zero_after_close(self, owncast_client: OwncastClient) -> None:
+        """Return zero after the HTTP session has been closed."""
+        await owncast_client.close()
+
+        assert owncast_client.open_connection_count == 0

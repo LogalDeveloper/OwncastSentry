@@ -38,9 +38,6 @@ _SECONDS_PER_DAY = 24 * _SECONDS_PER_HOUR
 
 def _sanitize_for_plain_text(text: str) -> str:
     """Sanitize text before Markdown escaping."""
-    if not text:
-        return text
-
     sanitized = text.replace("\n", " ").replace("\r", " ")
     return " ".join(sanitized.split())
 
