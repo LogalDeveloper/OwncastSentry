@@ -89,6 +89,11 @@ class TestStreamSchema:
                 id="invalid-online",
             ),
             pytest.param(
+                "INSERT INTO streams (domain, online) VALUES ($1, $2)",
+                ("missing-status.example", 1),
+                id="online-without-status",
+            ),
+            pytest.param(
                 """INSERT INTO streams (domain, failure_counter)
                    VALUES ($1, $2)""",
                 ("bad-counter.example", -1),
@@ -191,6 +196,7 @@ class TestSubscriptionSchema:
 
         assert stream is not None
         assert stream["online"] == 0
+        assert stream["status_since"] is None
         assert stream["failure_counter"] == 0
 
     async def test_subscription_insert_rolls_back_created_stream_on_failure(
@@ -566,10 +572,144 @@ class TestConstraintMigration:
         assert preserved["online"] == 1
         assert preserved["status_since"] == "2026-01-01T12:00:00+00:00"
         assert preserved["failure_counter"] == 7
-        assert streams["truthy-online.example"]["online"] == 1
+        assert streams["truthy-online.example"]["online"] == 0
+        assert streams["truthy-online.example"]["status_since"] is None
         assert streams["falsy-online.example"]["online"] == 0
         assert streams["negative-counter.example"]["failure_counter"] == 0
         assert streams["null-counter.example"]["failure_counter"] == 0
+
+    async def test_v6_repairs_online_stream_without_status_timestamp(
+        self, tmp_path: Path
+    ) -> None:
+        """Repair v5 stream rows that were marked online without a timestamp."""
+        db_path = tmp_path / "legacy.db"
+        with closing(sqlite3.connect(db_path)) as conn, conn:
+            conn.executescript(
+                """
+                CREATE TABLE version (version INTEGER PRIMARY KEY);
+                INSERT INTO version (version) VALUES (5);
+
+                CREATE TABLE streams (
+                    domain TEXT NOT NULL CHECK(length(trim(domain)) > 0),
+                    name TEXT,
+                    title TEXT,
+                    online INTEGER NOT NULL DEFAULT 0 CHECK(online IN (0, 1)),
+                    status_since TEXT,
+                    failure_counter INTEGER NOT NULL DEFAULT 0
+                        CHECK(failure_counter >= 0),
+                    PRIMARY KEY(domain)
+                );
+
+                CREATE TABLE subscriptions (
+                    stream_domain TEXT NOT NULL
+                        CHECK(length(trim(stream_domain)) > 0),
+                    room_id TEXT NOT NULL CHECK(length(trim(room_id)) > 0),
+                    PRIMARY KEY(room_id, stream_domain),
+                    FOREIGN KEY(stream_domain)
+                        REFERENCES streams(domain)
+                        ON DELETE CASCADE
+                );
+
+                CREATE INDEX subscriptions_stream_domain_idx
+                    ON subscriptions(stream_domain);
+
+                CREATE TRIGGER create_stream_for_subscription
+                   BEFORE INSERT ON subscriptions
+                   BEGIN
+                       INSERT INTO streams (domain)
+                       VALUES (NEW.stream_domain)
+                       ON CONFLICT(domain) DO NOTHING;
+                   END;
+
+                CREATE TRIGGER delete_unsubscribed_stream
+                   AFTER DELETE ON subscriptions
+                   WHEN NOT EXISTS (
+                       SELECT 1
+                       FROM subscriptions
+                       WHERE stream_domain = OLD.stream_domain
+                   )
+                   BEGIN
+                       DELETE FROM streams
+                       WHERE domain = OLD.stream_domain;
+                   END;
+
+                INSERT INTO streams (
+                    domain, name, title, online, status_since, failure_counter
+                )
+                VALUES
+                    (
+                        'valid-live.example',
+                        'Valid Live',
+                        'Valid Title',
+                        1,
+                        '2026-01-01T12:00:00+00:00',
+                        3
+                    ),
+                    ('missing-status.example', 'Missing Status', NULL, 1, NULL, 4),
+                    ('offline.example', 'Offline', NULL, 0, NULL, 5);
+
+                INSERT INTO subscriptions (stream_domain, room_id)
+                VALUES
+                    ('valid-live.example', '!valid:example.com'),
+                    ('missing-status.example', '!missing:example.com'),
+                    ('offline.example', '!offline:example.com');
+                """
+            )
+
+        db = Database.create(f"sqlite:///{db_path}", upgrade_table=get_upgrade_table())
+        await db.start()
+        try:
+            async with db.acquire() as conn:
+                rows = await conn.fetch(
+                    """SELECT domain, name, title, online, status_since, failure_counter
+                       FROM streams
+                       ORDER BY domain"""
+                )
+                subscriptions = await conn.fetch(
+                    """SELECT stream_domain, room_id
+                       FROM subscriptions
+                       ORDER BY stream_domain"""
+                )
+                foreign_key_errors = await conn.fetch("PRAGMA foreign_key_check")
+
+                await conn.execute(
+                    """INSERT INTO subscriptions (stream_domain, room_id)
+                       VALUES ($1, $2)""",
+                    "trigger-created.example",
+                    "!trigger:example.com",
+                )
+                trigger_created_stream = await conn.fetchrow(
+                    "SELECT * FROM streams WHERE domain=$1",
+                    "trigger-created.example",
+                )
+        finally:
+            await db.stop()
+
+        streams = {row["domain"]: row for row in rows}
+        valid_live = streams["valid-live.example"]
+        assert valid_live["online"] == 1
+        assert valid_live["status_since"] == "2026-01-01T12:00:00+00:00"
+        assert valid_live["failure_counter"] == 3
+
+        missing_status = streams["missing-status.example"]
+        assert missing_status["online"] == 0
+        assert missing_status["status_since"] is None
+        assert missing_status["failure_counter"] == 4
+
+        offline = streams["offline.example"]
+        assert offline["online"] == 0
+        assert offline["status_since"] is None
+        assert offline["failure_counter"] == 5
+
+        assert [(row["stream_domain"], row["room_id"]) for row in subscriptions] == [
+            ("missing-status.example", "!missing:example.com"),
+            ("offline.example", "!offline:example.com"),
+            ("valid-live.example", "!valid:example.com"),
+        ]
+        assert foreign_key_errors == []
+        assert trigger_created_stream is not None
+        assert trigger_created_stream["online"] == 0
+        assert trigger_created_stream["status_since"] is None
 
     async def test_removes_invalid_legacy_subscriptions(self, tmp_path: Path) -> None:
         """Drop legacy subscriptions with unusable domains or room IDs."""
@@ -758,6 +898,15 @@ class TestStreamUpdate:
         assert state is not None
         assert state.title == "Original Title"
         assert state.status_since == "2026-01-01T12:00:00+00:00"
+
+    async def test_rejects_online_without_status_since(
+        self, stream_repo: StreamRepository
+    ) -> None:
+        """Reject online stream updates that leave the status timestamp unknown."""
+        await stream_repo.create("example.com")
+
+        with pytest.raises(sqlite3.IntegrityError):
+            await stream_repo.update("example.com", online=True)
 
 
 class TestStreamFailureCounter:

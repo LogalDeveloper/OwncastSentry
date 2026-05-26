@@ -15,7 +15,7 @@
 """Command handlers for OwncastSentry bot commands."""
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from .types import (
     AlreadySubscribedError,
@@ -187,11 +187,11 @@ class CommandHandler:
 
             # Determine status and duration (as a sub-bullet)
             match stream_state.status:
-                case StreamStatus.ONLINE if stream_state.status_since:
-                    duration = _format_duration(stream_state.status_since, now)
-                    parts.append(f"  - Status: Online for {duration}  \n")
                 case StreamStatus.ONLINE:
-                    parts.append("  - Status: Online  \n")
+                    duration = _format_duration(
+                        cast("str", stream_state.status_since), now
+                    )
+                    parts.append(f"  - Status: Online for {duration}  \n")
                 case StreamStatus.UNKNOWN:
                     parts.append("  - Status: Unknown (instance unreachable)  \n")
                 case StreamStatus.OFFLINE if stream_state.status_since:
@@ -259,11 +259,8 @@ class CommandHandler:
                 parts.append(f"  - Title: {safe_title}  \n")
 
             # Add status with duration
-            if stream_state.status_since:
-                duration = _format_duration(stream_state.status_since, now)
-                parts.append(f"  - Online for {duration}  \n")
-            else:
-                parts.append("  - Online  \n")
+            duration = _format_duration(cast("str", stream_state.status_since), now)
+            parts.append(f"  - Online for {duration}  \n")
 
             # Add stream link
             parts.append(f"  - Link: https://{domain}\n\n")

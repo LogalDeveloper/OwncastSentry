@@ -313,6 +313,120 @@ async def upgrade_v5(conn: Connection) -> None:
     )
 
 
+@upgrade_table.register(  # type: ignore[arg-type, call-arg, untyped-decorator]
+    description="Require timestamps for online streams"
+)
+async def upgrade_v6(conn: Connection) -> None:
+    """Upgrade database schema to version 6 format.
+
+    Rebuilds the stream table with a constraint that requires online streams
+    to have a status timestamp. Legacy rows that are marked online without a
+    timestamp are treated as offline because their live start time is unknown.
+
+    :param conn: A connection to run the v6 database migration on.
+    """
+    await conn.execute(
+        """CREATE TABLE "streams_new" (
+            "domain" TEXT NOT NULL CHECK(length(trim("domain")) > 0),
+            "name" TEXT,
+            "title" TEXT,
+            "online" INTEGER NOT NULL DEFAULT 0 CHECK("online" IN (0, 1)),
+            "status_since" TEXT,
+            "failure_counter" INTEGER NOT NULL DEFAULT 0
+                CHECK("failure_counter" >= 0),
+            CHECK("online" = 0 OR "status_since" IS NOT NULL),
+            PRIMARY KEY("domain")
+        )"""
+    )
+
+    await conn.execute(
+        """INSERT INTO streams_new (
+               domain, name, title, online, status_since, failure_counter
+           )
+           SELECT domain,
+                  name,
+                  title,
+                  CASE
+                      WHEN online = 1 AND status_since IS NOT NULL THEN 1
+                      ELSE 0
+                  END,
+                  status_since,
+                  failure_counter
+           FROM streams"""
+    )
+
+    await conn.execute(
+        """CREATE TABLE "subscriptions_v6_copy" (
+            "stream_domain" TEXT NOT NULL,
+            "room_id" TEXT NOT NULL,
+            PRIMARY KEY("room_id", "stream_domain")
+        )"""
+    )
+    await conn.execute(
+        """INSERT INTO subscriptions_v6_copy (stream_domain, room_id)
+           SELECT stream_domain, room_id
+           FROM subscriptions
+           WHERE EXISTS (
+               SELECT 1
+               FROM streams_new
+               WHERE streams_new.domain = subscriptions.stream_domain
+           )"""
+    )
+
+    await conn.execute('DROP TRIGGER IF EXISTS "create_stream_for_subscription"')
+    await conn.execute('DROP TRIGGER IF EXISTS "delete_unsubscribed_stream"')
+    await conn.execute('DROP INDEX IF EXISTS "subscriptions_stream_domain_idx"')
+    await conn.execute("DROP TABLE subscriptions")
+    await conn.execute("DROP TABLE streams")
+    await conn.execute("ALTER TABLE streams_new RENAME TO streams")
+
+    await conn.execute(
+        """CREATE TABLE "subscriptions_new" (
+            "stream_domain" TEXT NOT NULL
+                CHECK(length(trim("stream_domain")) > 0),
+            "room_id" TEXT NOT NULL CHECK(length(trim("room_id")) > 0),
+            PRIMARY KEY("room_id", "stream_domain"),
+            FOREIGN KEY("stream_domain")
+                REFERENCES "streams"("domain")
+                ON DELETE CASCADE
+        )"""
+    )
+    await conn.execute(
+        """INSERT INTO subscriptions_new (stream_domain, room_id)
+           SELECT stream_domain, room_id
+           FROM subscriptions_v6_copy"""
+    )
+    await conn.execute("DROP TABLE subscriptions_v6_copy")
+    await conn.execute("ALTER TABLE subscriptions_new RENAME TO subscriptions")
+
+    await conn.execute(
+        """CREATE INDEX "subscriptions_stream_domain_idx"
+           ON "subscriptions"("stream_domain")"""
+    )
+    await conn.execute(
+        """CREATE TRIGGER "create_stream_for_subscription"
+           BEFORE INSERT ON "subscriptions"
+           BEGIN
+               INSERT INTO "streams" ("domain")
+               VALUES (NEW."stream_domain")
+               ON CONFLICT("domain") DO NOTHING;
+           END"""
+    )
+    await conn.execute(
+        """CREATE TRIGGER "delete_unsubscribed_stream"
+           AFTER DELETE ON "subscriptions"
+           WHEN NOT EXISTS (
+               SELECT 1
+               FROM "subscriptions"
+               WHERE "stream_domain" = OLD."stream_domain"
+           )
+           BEGIN
+               DELETE FROM "streams"
+               WHERE "domain" = OLD."stream_domain";
+           END"""
+    )
+
+
 def get_upgrade_table() -> UpgradeTable:
     """Return the repository upgrade table with registered migrations."""
     return upgrade_table
